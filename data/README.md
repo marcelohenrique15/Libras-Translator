@@ -8,7 +8,8 @@ data/
 └── <dataset>/
     ├── README.md
     ├── raw/
-    │   └── videos/
+    │   ├── amostra-001.mp4
+    │   └── ...
     ├── metadata/
     │   ├── manifest.csv
     │   ├── labels.csv
@@ -21,7 +22,7 @@ data/
 
 ## `raw/`
 
-Contém os arquivos originais do dataset. Vídeos devem ser colocados em:
+Contém os arquivos originais do dataset. Vídeos devem ser colocados diretamente em:
 
 ```text
 data/<dataset>/raw/
@@ -48,15 +49,15 @@ Contém somente dados derivados de `raw/`. Cada representação deve ser separad
 ├── landmarks/
 │   ├── samples/
 │   ├── config.yaml
-│   └── manifest.csv/
+│   └── manifest.csv
 ├── videos/
 │   ├── samples/
 │   ├── config.yaml
-│   └── manifest.csv/
+│   └── manifest.csv
 └── embeddings/
     ├── samples/
     ├── config.yaml
-    └── manifest.csv/
+    └── manifest.csv
 ```
 
 - `landmarks/`: coordenadas extraídas por MediaPipe ou outro detector;
