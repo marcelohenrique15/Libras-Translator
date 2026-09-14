@@ -1,0 +1,1 @@
+"""Leitura, validação e preparação dos dados."""

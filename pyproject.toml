@@ -10,6 +10,9 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = []
 
+[project.scripts]
+libras-translator = "libras_translator.cli.main:main"
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 
