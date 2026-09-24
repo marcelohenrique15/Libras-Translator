@@ -1,1 +1,0 @@
-"""Ferramentas para reconhecimento automático de sinais isolados de Libras."""

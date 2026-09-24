@@ -11,11 +11,12 @@ requires-python = ">=3.12,<3.13"
 dependencies = []
 
 [project.scripts]
-libras-translator = "libras_translator.cli.main:main"
+libras-translator = "cli.main:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["libras_translator*"]
+include = ["cli*", "dataset*"]
+namespaces = true
