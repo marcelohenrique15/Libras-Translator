@@ -13,7 +13,7 @@ data/<dataset>/
     └── embeddings/       # representações dos modelos
 ```
 
-- Coloque os vídeos diretamente em `raw/`, preservando nomes e conteúdo.
+- Coloque os vídeos em `raw/`, inclusive em subpastas por sinalizador, preservando os nomes.
 - Salve os resultados de processamento em `processed/`, separados por método e versão.
 - Guarde a configuração usada e preserve a relação com o `sample_id` original.
 - Versione `metadata/` e os READMEs. Não versione `raw/` nem `processed/`.
@@ -21,10 +21,10 @@ data/<dataset>/
 
 ## Manifesto
 
-`metadata/manifest.csv` contém uma linha por vídeo, com identificação, rótulo,
-sinalizador, repetição e metadados técnicos.
+`metadata/manifest.csv` contém uma linha por vídeo selecionado, com `sample_id`,
+`class_id`, `label`, `signer_id`, `repetition`, `path` e `set` (`train` ou `test`).
 
-O campo `path` é relativo à raiz do dataset: `raw/arquivo.mp4`.
+O campo `path` é relativo à raiz do dataset, por exemplo `raw/01AcontecerSinalizador01-1.mp4`.
 O `class_id` é o identificador original, não o índice de treinamento do PyTorch.
-
-`labels.csv` e `splits.csv` serão adicionados na etapa de preparação dos experimentos.
+O manifesto é sobrescrito ao executar novamente `--build-manifest` com outro
+`--test-signer-id`.
