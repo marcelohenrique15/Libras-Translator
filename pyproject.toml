@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "mediapipe==0.10.21",
+    "opencv-contrib-python>=4.11,<4.12",
     "torch>=2.3,<3",
 ]
 
@@ -21,5 +22,5 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["cli*", "dataset*"]
+include = ["cli*", "dataset*", "preprocessor*"]
 namespaces = true

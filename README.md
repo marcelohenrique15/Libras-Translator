@@ -30,3 +30,12 @@ libras-translator --build-manifest data/minds_libras --test-signer-id 05
 
 O comando cria ou sobrescreve `data/minds_libras/metadata/manifest.csv`.
 A coluna `set` marca o sinalizador 05 como `test` e os demais como `train`.
+
+Extraia os landmarks de todos os vídeos do manifesto:
+
+```bash
+libras-translator --extract-landmarks data/minds_libras
+```
+
+Cada vídeo gera um CSV em `data/minds_libras/processed/landmarks/`, com
+coordenadas `x` e `y` por quadro. Pontos não detectados ficam vazios.
