@@ -220,4 +220,7 @@ __marimo__/
 data/*/raw/
 data/*/processed/
 data/*/metadata/
-docs/
+docs/*
+!docs/EXTENDING.md
+/runs/
+/weights/
