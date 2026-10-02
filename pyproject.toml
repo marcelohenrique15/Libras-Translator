@@ -10,8 +10,14 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "mediapipe==0.10.21",
+    "numpy>=1.26,<2",
     "opencv-contrib-python>=4.11,<4.12",
+    "optuna>=4.5,<6",
+    "pandas>=2.2,<3",
+    "Pillow>=10,<13",
+    "scipy>=1.11,<2",
     "torch>=2.3,<3",
+    "torchvision>=0.18,<1",
 ]
 
 [project.scripts]
@@ -22,5 +28,5 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["cli*", "dataset*", "preprocessor*"]
+include = ["cli*", "dataset*", "preprocessor*", "models*", "training*"]
 namespaces = true
