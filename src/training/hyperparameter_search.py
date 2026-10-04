@@ -8,7 +8,10 @@ from training.config import TrainingConfig
 
 
 class HyperparameterSearch:
-    PARAMETERS = {"learning_rate", "weight_decay", "batch_size", "epochs", "patience"}
+    PARAMETERS = {
+        "learning_rate", "weight_decay", "batch_size", "epochs", "patience",
+        "l1_lambda", "l2_lambda", "label_smoothing", "gradient_clip",
+    }
 
     def __init__(self, path: Path) -> None:
         with Path(path).open("rb") as file:
@@ -51,11 +54,17 @@ class HyperparameterSearch:
         return study.best_trial
 
     def configuration(self, base_config: TrainingConfig, parameters: dict) -> TrainingConfig:
-        overrides = {"search_config": None, "search_trials": None}
+        overrides = {
+            "search_config": None, "search_trials": None, "reuse_search": None,
+            "force_restart": False, "final_epochs": None,
+        }
         model_options = dict(base_config.model_options)
         processor_options = dict(base_config.processor_options)
         for name, value in parameters.items():
             if name.startswith("model_options."):
+                # Optuna usa categorias escalares; o modelo recebe nomes de camadas em lista.
+                if name == "model_options.trainable_layers" and isinstance(value, str):
+                    value = [layer.strip() for layer in value.split(",") if layer.strip()]
                 model_options[name.split(".", maxsplit=1)[1]] = value
             elif name.startswith("processor_options."):
                 processor_options[name.split(".", maxsplit=1)[1]] = value

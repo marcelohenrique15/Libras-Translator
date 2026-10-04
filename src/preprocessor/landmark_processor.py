@@ -46,7 +46,7 @@ class LandmarkProcessor():
         representation: str = "image",
         frame_count: int = 64,
         image_size: int = 224,
-        augmentation: bool = True,
+        augmentation: bool = False,
     ) -> None:
         if subset not in self.SUBSETS:
             raise ValueError(f"Subset desconhecido: {subset}. Use: {', '.join(self.SUBSETS)}.")
@@ -54,6 +54,8 @@ class LandmarkProcessor():
             raise ValueError("Use representation='image' ou 'sequence'.")
         if frame_count < 1 or image_size < 1:
             raise ValueError("frame_count e image_size devem ser positivos.")
+        if augmentation:
+            raise ValueError("Este experimento não permite data augmentation.")
 
         self.landmarks_dir = dataset_root / "processed" / "landmarks"
         self.landmark_groups = self.SUBSETS[subset]
@@ -128,25 +130,6 @@ class LandmarkProcessor():
         cached = np.rint(encoded * 255).astype(np.uint8) if self.representation == "image" else encoded
         self._save_array(cache_path, cached)
         return encoded
-
-    def augment(self, landmarks: np.ndarray) -> np.ndarray:
-        if not self.augmentation:
-            return landmarks
-
-        landmarks = np.clip(landmarks, 0, 1).copy()
-        center = landmarks.mean(axis=(0, 1), keepdims=True)
-        angle = np.deg2rad(np.random.normal(0, 12))
-        rotation = np.array([
-            [np.cos(angle), -np.sin(angle)],
-            [np.sin(angle), np.cos(angle)],
-        ], dtype=np.float32)
-
-        landmarks = (landmarks - center) @ rotation.T + center
-        landmarks *= np.random.normal(1, 0.1)
-        landmarks[:, :, 0] += np.random.normal(0, 0.06)
-        if np.random.random() < 0.5:
-            landmarks[:, :, 0] = 1 - landmarks[:, :, 0]
-        return landmarks
 
     def prepare_all(self, rows: list[dict[str, str]], stage: str = "encode") -> None:
         if stage not in {"select", "impute", "encode"}:

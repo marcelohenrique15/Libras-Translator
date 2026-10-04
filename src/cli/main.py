@@ -18,9 +18,14 @@ def main() -> None:
     parser.add_argument("--test-signer-id", help="ID de teste ou all para LOPO completo")
     parser.add_argument("--validation-signer-id", help="Executa apenas uma rodada de validação")
     parser.add_argument("--epochs", type=int)
+    parser.add_argument("--final-epochs", type=int, help="Duração final já selecionada; dispensa validações internas sem busca")
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--learning-rate", type=float)
     parser.add_argument("--weight-decay", type=float)
+    parser.add_argument("--l1-lambda", type=float)
+    parser.add_argument("--l2-lambda", type=float)
+    parser.add_argument("--label-smoothing", type=float)
+    parser.add_argument("--gradient-clip", type=float)
     parser.add_argument("--patience", type=int)
     parser.add_argument("--device", help="auto, cpu, cuda ou cuda:N")
     parser.add_argument("--num-workers", type=int)
@@ -29,10 +34,13 @@ def main() -> None:
     parser.add_argument("--weights-dir", type=Path)
     parser.add_argument("--search-config", type=Path, help="Espaço de busca TOML para o Optuna")
     parser.add_argument("--search-trials", type=int, help="Total de tentativas concluídas por estudo Optuna")
+    parser.add_argument("--reuse-search", type=Path, help="Importa a configuração vencedora de uma busca salva")
+    parser.add_argument("--force-restart", action="store_true", default=None, help="Cria nova execução, sem reutilizar treinos nem apagar resultados anteriores")
     parser.add_argument("--subset", choices=("asl_2nd", "all", "arcanjo"))
     parser.add_argument("--frame-count", type=int)
     parser.add_argument("--imputation", action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument("--augmentation", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--augmentation", action=argparse.BooleanOptionalAction, default=None,
+                        help="Compatibilidade: este experimento aceita somente --no-augmentation")
     args = parser.parse_args()
 
     if args.list_models:
@@ -53,8 +61,9 @@ def main() -> None:
 
     argument_names = (
         "dataset", "dataset_format", "model", "processor", "test_signer_id", "validation_signer_id",
-        "epochs", "batch_size", "learning_rate", "weight_decay", "patience", "device", "num_workers",
-        "seed", "output_dir", "weights_dir", "search_config", "search_trials",
+        "epochs", "final_epochs", "batch_size", "learning_rate", "weight_decay", "patience", "device", "num_workers",
+        "l1_lambda", "l2_lambda", "label_smoothing", "gradient_clip",
+        "seed", "output_dir", "weights_dir", "search_config", "search_trials", "reuse_search", "force_restart",
     )
     overrides = {name: getattr(args, name) for name in argument_names if getattr(args, name) is not None}
     actions = ("build_manifest", "split_manifest", "extract_landmarks", "select_landmarks", "impute_landmarks", "encode_landmarks", "train")

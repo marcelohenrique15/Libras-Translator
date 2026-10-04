@@ -9,6 +9,7 @@ description = "Pesquisa e treinamento de modelos para reconhecimento de sinais i
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "matplotlib>=3.8,<4",
     "mediapipe==0.10.21",
     "numpy>=1.26,<2",
     "opencv-contrib-python>=4.11,<4.12",

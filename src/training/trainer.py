@@ -10,30 +10,32 @@ from torch.utils.data import DataLoader
 
 
 class Trainer():
+    """Treina folds para seleção e um modelo final sem usar dados de teste."""
+
     def __init__(self, output_dir: Path, class_to_index: dict[str, int], config: dict) -> None:
         self.output_dir = output_dir
         self.class_to_index = class_to_index
         self.config = config
         self.device = torch.device(config["device"])
         self.criterion = nn.CrossEntropyLoss()
+        self.training_criterion = nn.CrossEntropyLoss(label_smoothing=config.get("label_smoothing", 0.0))
 
     # Público
     def train(self, model: nn.Module, train_dataset, validation_dataset) -> dict:
+        """Busca: escolhe a melhor época pelo F1 de validação e salva best.pt."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
         validation_path = self.output_dir / "validation.json"
         if validation_path.exists() and (self.output_dir / "best.pt").exists():
             return json.loads(validation_path.read_text(encoding="utf-8"))
 
         model.to(self.device)
-        optimizer = torch.optim.Adam(
-            (parameter for parameter in model.parameters() if parameter.requires_grad),
-            lr=self.config["learning_rate"],
-            weight_decay=self.config["weight_decay"],
-        )
+        optimizer = self._optimizer(model)
         start_epoch, best_f1, stale_epochs, history = 1, -1.0, 0, []
         last_path = self.output_dir / "last.pt"
         if last_path.exists():
             last = torch.load(last_path, map_location=self.device, weights_only=True)
+            if last.get("mode", "validation") != "validation":
+                raise ValueError("O diretório contém um treino final; use outro diretório para validação.")
             model.load_state_dict(last["model_state_dict"])
             optimizer.load_state_dict(last["optimizer_state_dict"])
             start_epoch = last["epoch"] + 1
@@ -49,6 +51,8 @@ class Trainer():
             history.append({
                 "epoch": epoch,
                 "train_loss": training["loss"],
+                "train_objective": training.get("objective", training["loss"]),
+                "train_accuracy": training.get("accuracy"),
                 "train_f1_macro": training["f1_macro"],
                 "validation_loss": validation["loss"],
                 "validation_accuracy": validation["accuracy"],
@@ -71,6 +75,7 @@ class Trainer():
                 stale_epochs += 1
 
             self._save_torch("last.pt", {
+                "mode": "validation", "config": self.config,
                 "model_state_dict": model.state_dict(), "optimizer_state_dict": optimizer.state_dict(),
                 "epoch": epoch, "best_f1": best_f1, "stale_epochs": stale_epochs,
                 "history": history, "random_state": self._random_state(),
@@ -86,11 +91,70 @@ class Trainer():
         self.write_json("validation.json", result)
         return result
 
+    def fit(self, model: nn.Module, train_dataset) -> dict:
+        """Refit: treina todos os dados de desenvolvimento pelo orçamento fixado."""
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        training_path = self.output_dir / "training.json"
+        if training_path.exists() and (self.output_dir / "final.pt").exists():
+            return json.loads(training_path.read_text(encoding="utf-8"))
+
+        model.to(self.device)
+        optimizer = self._optimizer(model)
+        start_epoch, history = 1, []
+        last_path = self.output_dir / "last.pt"
+        if last_path.exists():
+            last = torch.load(last_path, map_location=self.device, weights_only=True)
+            if last.get("mode") != "fit":
+                raise ValueError("O diretório contém validação; use outro diretório para o treino final.")
+            model.load_state_dict(last["model_state_dict"])
+            optimizer.load_state_dict(last["optimizer_state_dict"])
+            start_epoch, history = last["epoch"] + 1, last["history"]
+            self._restore_random_state(last["random_state"])
+            print(f"Retomando treino final a partir da época {start_epoch}.", flush=True)
+
+        for epoch in range(start_epoch, self.config["epochs"] + 1):
+            training = self._train_epoch(model, optimizer, train_dataset)
+            history.append({
+                "epoch": epoch,
+                "train_loss": training["loss"],
+                "train_objective": training.get("objective", training["loss"]),
+                "train_accuracy": training["accuracy"],
+                "train_f1_macro": training["f1_macro"],
+            })
+            print(
+                f"Treino final {epoch}/{self.config['epochs']} | "
+                f"F1={training['f1_macro']:.4f}, loss={training['loss']:.4f}, "
+                f"objetivo={history[-1]['train_objective']:.4f}", flush=True,
+            )
+            self._save_torch("last.pt", {
+                "mode": "fit", "config": self.config,
+                "model_state_dict": model.state_dict(), "optimizer_state_dict": optimizer.state_dict(),
+                "epoch": epoch, "history": history, "random_state": self._random_state(),
+            })
+            self.write_json("history.json", history)
+
+        result = {
+            "final_epoch": history[-1]["epoch"], "epochs_trained": len(history),
+            "sample_count": len(train_dataset),
+            **{name: value for name, value in history[-1].items() if name.startswith("train_")},
+        }
+        # Também recupera o histórico se a interrupção ocorreu após salvar last.pt.
+        self.write_json("history.json", history)
+        self._save_torch("final.pt", {
+            "model_state_dict": model.state_dict(), "class_to_index": self.class_to_index,
+            "config": self.config, "epoch": result["final_epoch"], "training": result,
+        })
+        self.write_json("training.json", result)
+        return result
+
     def test(self, model: nn.Module, dataset) -> dict:
         test_path = self.output_dir / "test.json"
         if test_path.exists():
             return json.loads(test_path.read_text(encoding="utf-8"))
-        checkpoint = torch.load(self.output_dir / "best.pt", map_location=self.device, weights_only=True)
+        checkpoint_path = self.output_dir / "final.pt"
+        if not checkpoint_path.exists():
+            checkpoint_path = self.output_dir / "best.pt"
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
         model.to(self.device).load_state_dict(checkpoint["model_state_dict"])
         result = {"metrics": self._evaluate(model, dataset), "sample_ids": [row["sample_id"] for row in dataset.rows]}
         self.write_json("test.json", result)
@@ -105,24 +169,66 @@ class Trainer():
         temporary_path.replace(self.output_dir / name)
 
     # Privado
+    def _optimizer(self, model: nn.Module) -> torch.optim.Optimizer:
+        weights, other = [], []
+        for parameter in model.parameters():
+            if parameter.requires_grad:
+                (weights if parameter.ndim > 1 else other).append(parameter)
+        if not weights and not other:
+            raise ValueError("O modelo precisa ter pelo menos um parâmetro treinável.")
+        # Weight decay é desacoplado (AdamW); bias e normalização não são penalizados.
+        groups = [
+            {"params": weights, "weight_decay": self.config.get("weight_decay", 0.0)},
+            {"params": other, "weight_decay": 0.0},
+        ]
+        return torch.optim.AdamW(groups, lr=self.config["learning_rate"])
+
+    def _regularization(self, model: nn.Module) -> torch.Tensor:
+        penalty = torch.zeros((), device=self.device)
+        l1, l2 = self.config.get("l1_lambda", 0.0), self.config.get("l2_lambda", 0.0)
+        if not l1 and not l2:
+            return penalty
+        for parameter in model.parameters():
+            if parameter.requires_grad and parameter.ndim > 1:
+                if l1:
+                    penalty = penalty + l1 * parameter.abs().sum()
+                if l2:
+                    penalty = penalty + l2 * parameter.square().sum()
+        return penalty
+
+    def _forward_logits(self, model: nn.Module, inputs: torch.Tensor) -> torch.Tensor:
+        output_format = getattr(model, "OUTPUT_FORMAT", "logits")
+        if output_format == "probabilities":
+            forward_logits = getattr(model, "forward_logits", None)
+            if not callable(forward_logits):
+                raise ValueError("Modelos com OUTPUT_FORMAT='probabilities' precisam implementar forward_logits para o treino.")
+            return forward_logits(inputs)
+        if output_format != "logits":
+            raise ValueError("OUTPUT_FORMAT deve ser 'logits' ou 'probabilities'.")
+        return model(inputs)
+
     def _train_epoch(self, model, optimizer, dataset) -> dict:
         model.train()
         batchnorm = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)
         minimum_batch = 2 if any(isinstance(layer, batchnorm) and layer.training for layer in model.modules()) else 1
         batches = self._train_batches(len(dataset), minimum_batch)
         loader = self._loader(dataset, batches=batches)
-        total_loss, expected, predicted = 0.0, [], []
+        total_loss, total_objective, expected, predicted = 0.0, 0.0, [], []
         for inputs, labels in loader:
             inputs, labels = inputs.to(self.device), labels.to(self.device)
-            optimizer.zero_grad()
-            logits = model(inputs)
-            loss = self.criterion(logits, labels)
-            loss.backward()
+            optimizer.zero_grad(set_to_none=True)
+            logits = self._forward_logits(model, inputs)
+            objective = self.training_criterion(logits, labels) + self._regularization(model)
+            objective.backward()
+            if self.config.get("gradient_clip", 0.0):
+                nn.utils.clip_grad_norm_(model.parameters(), self.config["gradient_clip"])
             optimizer.step()
-            total_loss += loss.item() * len(labels)
+            # CE sem suavização é comparável à validação; objetivo inclui a regularização.
+            total_loss += self.criterion(logits.detach(), labels).item() * len(labels)
+            total_objective += objective.item() * len(labels)
             expected.extend(labels.cpu().tolist())
             predicted.extend(logits.detach().argmax(dim=1).cpu().tolist())
-        return {"loss": total_loss / len(dataset), **self._metrics(expected, predicted)}
+        return {"loss": total_loss / len(dataset), "objective": total_objective / len(dataset), **self._metrics(expected, predicted)}
 
     def _train_batches(self, sample_count: int, minimum_batch: int = 1) -> list[list[int]]:
         batch_size = self.config["batch_size"]
@@ -144,15 +250,19 @@ class Trainer():
 
     def _evaluate(self, model, dataset) -> dict:
         model.eval()
-        total_loss, expected, predicted = 0.0, [], []
+        total_loss, expected, predicted, probabilities = 0.0, [], [], []
         with torch.no_grad():
             for inputs, labels in self._loader(dataset):
                 inputs, labels = inputs.to(self.device), labels.to(self.device)
-                logits = model(inputs)
+                logits = self._forward_logits(model, inputs)
                 total_loss += self.criterion(logits, labels).item() * len(labels)
                 expected.extend(labels.cpu().tolist())
                 predicted.extend(logits.argmax(dim=1).cpu().tolist())
-        return {"loss": total_loss / len(dataset), **self._metrics(expected, predicted), "expected": expected, "predicted": predicted}
+                probabilities.extend(logits.softmax(dim=1).cpu().tolist())
+        return {
+            "loss": total_loss / len(dataset), **self._metrics(expected, predicted),
+            "expected": expected, "predicted": predicted, "probabilities": probabilities,
+        }
 
     def _metrics(self, expected: list[int], predicted: list[int]) -> dict:
         matrix = np.zeros((len(self.class_to_index), len(self.class_to_index)), dtype=np.int64)

@@ -15,26 +15,38 @@ python -m pip install -e .
 ## Treino
 
 ```bash
-libras-translator --train --dataset minds_libras --model resnet18
 libras-translator --train --config configs/resnet18.toml
-libras-translator --train --config configs/landmark_lstm.toml --epochs 50
 libras-translator --list-models
 ```
 
-`--dataset` aceita uma pasta em `data/` ou um caminho. A forma anterior `--train data/minds_libras` também funciona. Argumentos CLI substituem os valores do arquivo; opções específicas ficam nas tabelas `model_options` e `processor_options`. Também é possível carregar um `best_config_test<ID>.json` produzido pela busca.
+O preset ResNet18 já inclui a busca Optuna de `configs/search.toml` e reserva o sinalizador **05** para teste. O protocolo é:
 
-O pipeline mostra os passos: manifesto → landmarks → seleção → imputação → codificação → treino → avaliação. Reutiliza arquivos atuais e rodadas concluídas. Uma rodada interrompida retoma da próxima época salva. Augmentation acontece somente no treino, antes da codificação.
+1. Preparar manifesto, landmarks, seleção, imputação e codificação, reutilizando caches atuais.
+2. Buscar hiperparâmetros somente nos sinalizadores disponíveis para treinamento. Cada tentativa alterna a pessoa de validação; o teste externo permanece reservado.
+3. Escolher a configuração com maior **F1 macro médio de validação**. A mediana das melhores épocas de suas divisões define a duração do treinamento final, arredondando `.5` para cima.
+4. Inicializar **um modelo novo** e treiná-lo em todos os sinalizadores fora do teste pelo número de épocas escolhido.
+5. Avaliar esse modelo no teste reservado e gerar métricas, tabelas e gráficos.
+
+Com os 12 sinalizadores atuais e 20 tentativas, são **220 treinamentos internos e um treinamento final** para o teste 05. O final usa os 11 sinalizadores disponíveis, sem validação ou early stopping: a duração já foi definida na etapa anterior. Não se escolhem configurações, épocas ou checkpoints pelo resultado do teste.
+
+`--dataset` aceita uma pasta em `data/` ou um caminho. A forma `--train data/minds_libras` também funciona. Argumentos CLI substituem o TOML ou JSON carregado; opções específicas ficam em `model_options` e `processor_options`.
+
+O experimento usa processamento determinístico, **sem data augmentation**, em treino, validação e teste. `augmentation=true` é rejeitado. O preset procura reduzir overfitting com congelamento de camadas, dropout, AdamW, penalidades L1/L2 e label smoothing; essas técnicas não garantem ganho de generalização.
 
 | Opções | Uso |
 |---|---|
-| `--epochs`, `--batch-size`, `--learning-rate`, `--weight-decay`, `--patience` | Treino |
+| `--epochs`, `--patience` | Limite de épocas e early stopping nas validações internas |
+| `--final-epochs` | Duração final já selecionada, para uma configuração sem busca |
+| `--batch-size`, `--learning-rate`, `--weight-decay` | Treino; weight decay desacoplado do AdamW |
+| `--l1-lambda`, `--l2-lambda`, `--label-smoothing`, `--gradient-clip` | Penalidades explícitas, suavização de rótulos e clipping |
 | `--test-signer-id ID\|all`, `--validation-signer-id ID` | Divisão por sinalizador |
 | `--subset asl_2nd\|all\|arcanjo`, `--frame-count` | Pontos e tamanho das sequências |
-| `--imputation` / `--no-imputation`, `--augmentation` / `--no-augmentation` | Processamento |
+| `--imputation` / `--no-imputation` | Processamento |
 | `--processor NOME` | Processor registrado ou `pacote.modulo:Classe` |
 | `--device auto\|cpu\|cuda:N`, `--num-workers`, `--seed` | Execução |
 | `--output-dir`, `--weights-dir` | Resultados e pesos compartilhados |
 | `--search-config`, `--search-trials` | Espaço de busca Optuna e total de tentativas concluídas |
+| `--reuse-search`, `--force-restart` | Importar uma busca salva ou iniciar treinos em um diretório novo |
 
 Sem escolher o teste, usa o sinalizador marcado no manifesto ou o primeiro ID disponível. Cada outro sinalizador é usado para validação. `--validation-signer-id` restringe a uma rodada. Para LOPO completo:
 
@@ -42,7 +54,7 @@ Sem escolher o teste, usa o sinalizador marcado no manifesto ou o primeiro ID di
 libras-translator --train --config configs/resnet18.toml --test-signer-id all
 ```
 
-Com 12 sinalizadores, são 132 rodadas. Treino, validação e teste usam sinalizadores diferentes. O melhor checkpoint e o early stopping seguem o **F1-macro de validação**. A loss usada nos gradientes continua sendo cross-entropy.
+Cada teste externo tem um estudo próprio. Com 12 sinalizadores e 20 tentativas por estudo, o LOPO completo custa **2.640 treinamentos internos + 12 finais = 2.652 treinamentos**. `--validation-signer-id` reduz a seleção a uma única pessoa de validação; o modelo final ainda treina em todas as pessoas fora do teste.
 
 ## Preparação por etapa
 
@@ -60,19 +72,59 @@ libras-translator --encode-landmarks --config configs/resnet18.toml
 ## Busca de hiperparâmetros
 
 ```bash
-libras-translator --train --config configs/resnet18.toml --search-config configs/search.toml
+libras-translator --train --config configs/resnet18.toml --search-trials 10
 ```
 
-O Optuna usa TPE para sugerir hiperparâmetros e **maximizar a média do F1-macro nas validações internas**. O teste externo avalia somente a configuração vencedora. Com `all`, cada sinalizador de teste tem um estudo próprio. O melhor resultado fica salvo; uma tentativa nova pode explorar uma configuração pior.
+O Optuna usa TPE e maximiza a média do F1 macro nas validações internas. O espaço padrão busca taxa de aprendizado, batch, limite de épocas, weight decay do AdamW, L1, L2, label smoothing, largura e quantidade de camadas do classificador, dropout e quais camadas da ResNet podem aprender. `epochs` limita cada treino interno; a duração final deriva das melhores épocas da configuração vencedora.
 
-O exemplo tem `n_trials = 20`: vinte tentativas concluídas por estudo. O histórico fica em `optuna.sqlite3` no diretório da busca. Repetir o comando retoma o estudo e os checkpoints existentes. Para ampliar o orçamento para quarenta tentativas no total:
+Repetir o mesmo comando reutiliza o estudo, as divisões concluídas, o treinamento final e o teste quando ainda correspondem ao código, aos dados e à configuração. Treinos interrompidos retomam a partir de `last.pt`; uma época incompleta é repetida. O orçamento representa o total de tentativas **concluídas**, não novas tentativas a cada execução. Para ampliar a busca para quarenta no total:
 
 ```bash
 libras-translator --train --config configs/resnet18.toml \
-  --search-config configs/search.toml --search-trials 40
+  --search-trials 40
 ```
 
-Defina listas de opções ou intervalos no [arquivo de busca](configs/search.toml). Parâmetros de modelos e processors também podem ser ajustados; veja o [guia de extensão](docs/EXTENDING.md#configuração-e-busca).
+Para executar uma nova busca e novos treinos sem apagar resultados anteriores:
+
+```bash
+libras-translator --train --config configs/resnet18.toml --force-restart
+```
+
+`--force-restart` cria um diretório `fresh_<id>` e preserva os caches de pré-processamento. Quando `pretrained=true`, a inicialização nova usa pesos ImageNet e um classificador novo; não reaproveita pesos aprendidos nas divisões da busca.
+
+Para aproveitar apenas os parâmetros vencedores de uma busca salva e fazer um novo treinamento final:
+
+```bash
+libras-translator --train --config configs/resnet18.toml \
+  --reuse-search runs/minds_libras/search_1cf0ec14bae0 --force-restart
+```
+
+Essa busca legada seleciona nove épocas finais. Ela usou outro protocolo: agora a augmentation está desativada e o otimizador é AdamW, além das opções novas de regularização. Seu F1 antigo descreve as validações de origem e **não valida o protocolo atual**. A importação registra essa origem; recomendamos a nova busca padrão para selecionar parâmetros no experimento atual.
+
+O arquivo `best_config_test<ID>.json` já contém `final_epochs` e desativa a busca. Carregá-lo executa diretamente o treinamento final e o teste; use `--force-restart` para treinar um novo modelo mesmo se essa execução já existir:
+
+```bash
+libras-translator --train --config caminho/best_config_test05.json --force-restart
+```
+
+Defina opções e intervalos no [arquivo de busca](configs/search.toml). O [guia de extensão](docs/EXTENDING.md#configuração-e-busca) explica como aplicá-los a outras arquiteturas e processors.
+
+## Resultados
+
+O console informa o caminho de `summary.json`. Cada teste externo produz um diretório `final/test_<ID>/<execução>/` com:
+
+| Arquivo | Conteúdo |
+|---|---|
+| `final.pt`, `last.pt` | Modelo final e estado para retomada |
+| `config.json`, `training.json`, `result.json`, `test.json` | Configuração, seleção de épocas, origem da busca e métricas |
+| `history.json` | Épocas do treinamento final |
+| `predictions.csv`, `per_class.csv` | Previsões com confiança softmax e métricas por classe |
+| `graphs/loss.png`, `graphs/f1.png` | Cross-entropy, objetivo regularizado e F1 do treino final |
+| `graphs/validation_loss.png`, `graphs/validation_f1_macro.png` | Curvas internas da configuração vencedora, quando disponíveis |
+| `graphs/search.png` | Evolução da busca Optuna, quando disponível |
+| `graphs/confusion_matrix*.png`, `graphs/per_class.png` | Matriz bruta, matriz normalizada por classe real e precisão/recall/F1 |
+
+As curvas finais não têm validação: o modelo recebe todos os dados de desenvolvimento. As curvas de validação pertencem aos treinamentos internos da busca. A confiança softmax é a probabilidade atribuída pelo modelo à classe prevista; não implica calibração de confiança.
 
 ## Organização e extensão
 
@@ -81,7 +133,7 @@ src/cli/              # argumentos e chamada das etapas
 src/dataset/          # manifesto, divisão e carregamento
 src/preprocessor/     # extração, seleção, imputação e codificação
 src/models/           # arquiteturas e registry
-src/training/         # configuração, treino, busca e pipeline
+src/training/         # configuração, seleção, treino, busca, relatórios e pipeline
 configs/              # presets e espaços de busca
 data/<dataset>/       # vídeos, manifesto e entradas processadas
 runs/<dataset>/       # configurações, checkpoints e métricas
@@ -93,24 +145,26 @@ Para adicionar modelos ou processors sem editar o pipeline, veja [como estender 
 
 ## Cluster
 
-Prepare os dados e os pesos em um ambiente com acesso à rede antes do job. Os pesos ImageNet são baixados no primeiro uso; também podem ser copiados para `weights/checkpoints/`. Para sequências, prepare usando o preset da LSTM.
+Prepare os dados e os pesos em um ambiente com acesso à rede antes do job. Os pesos ImageNet são baixados no primeiro uso; também podem ser copiados para `weights/checkpoints/`.
 
 Para treinar sem transferir os vídeos, copie `metadata/manifest.csv`, os CSVs de landmarks e `processed/landmarks/index.json`. Preserve as datas dos CSVs; o índice confirma a extração completa sem os vídeos originais.
 
 ```bash
 libras-translator --encode-landmarks --config configs/resnet18.toml
 libras-translator --train --config configs/resnet18.toml \
-  --test-signer-id 05 --validation-signer-id 01 \
+  --test-signer-id 05 \
   --device cuda:0 --num-workers 4 \
   --output-dir /scratch/libras/runs --weights-dir /scratch/libras/weights
 ```
 
-Cada processo deve escrever em uma combinação exclusiva de teste e validação. O projeto executa um processo por GPU; não distribui um treino entre GPUs nem envia jobs ao Slurm. `cuda:0` considera as GPUs visíveis para o processo.
+Cada processo deve escrever em uma execução exclusiva. O projeto executa um processo por GPU; não distribui um treino entre GPUs nem envia jobs ao Slurm. `cuda:0` considera as GPUs visíveis para o processo.
 
 A busca Optuna executa tentativas em sequência. Use um processo por busca e mantenha `--output-dir` em armazenamento local do nó para o SQLite. Não compartilhe o mesmo banco entre processos nem use SQLite em NFS.
 
 ## Experimento de referência
 
-O preset ResNet usa ASL-2nd com 80 pontos e imputação, baseado no [artigo](https://arxiv.org/html/2510.24887v4). Por padrão, apenas `layer4` e `fc` aprendem; as outras camadas e suas estatísticas de BatchNorm ficam congeladas. As camadas liberadas podem ser alteradas em `model_options.trainable_layers`. A LSTM aprende todos os seus pesos e recebe sequências de 64 frames no preset.
+O preset ResNet usa ASL-2nd com 80 pontos e imputação, baseado no [artigo](https://arxiv.org/html/2510.24887v4). Na configuração base, apenas `layer4` e `fc` aprendem; as outras camadas e suas estatísticas de BatchNorm ficam congeladas. A busca também considera treinar somente `fc`.
 
-Selecionar checkpoints por F1-macro, congelar camadas iniciais e usar LSTM ou busca são escolhas deste projeto. Elas modificam o experimento original, que seleciona checkpoints por acurácia e usa loss no early stopping.
+A ResNet termina em softmax para fornecer probabilidades. Durante o treinamento, `forward_logits()` entrega os valores anteriores ao softmax à cross-entropy, que calcula log-softmax de forma numericamente estável. O objetivo inclui label smoothing e as penalidades L1/L2 escolhidas; a loss registrada para comparação com a validação é a cross-entropy sem suavização ou penalidades.
+
+Seleção por F1 macro, busca, congelamento de camadas e treinamento final são escolhas deste projeto e devem ser descritos no relatório experimental. L1/L2 explícitas e weight decay do AdamW são controles diferentes, aplicados aos pesos treináveis; bias e parâmetros de normalização não são penalizados.

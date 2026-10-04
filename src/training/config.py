@@ -1,5 +1,6 @@
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
+import math
 import tomllib
 
 
@@ -15,7 +16,12 @@ class TrainingConfig:
     batch_size: int = 64
     learning_rate: float = 0.0001
     weight_decay: float = 0.0001
+    l1_lambda: float = 0.0
+    l2_lambda: float = 0.0
+    label_smoothing: float = 0.0
+    gradient_clip: float | None = 1.0
     patience: int = 5
+    final_epochs: int | None = None
     device: str = "auto"
     num_workers: int = 0
     seed: int = 42
@@ -25,22 +31,36 @@ class TrainingConfig:
     processor_options: dict = field(default_factory=dict)
     search_config: Path | None = None
     search_trials: int | None = None
+    reuse_search: Path | None = None
+    force_restart: bool = False
 
     def __post_init__(self) -> None:
-        for name in ("dataset", "output_dir", "weights_dir", "search_config"):
+        for name in ("dataset", "output_dir", "weights_dir", "search_config", "reuse_search"):
             value = getattr(self, name)
             if value is not None:
                 setattr(self, name, Path(value))
 
         self.model_options = dict(self.model_options)
         self.processor_options = dict(self.processor_options)
+        if self.processor_options.get("augmentation", False):
+            raise ValueError("Este experimento não permite data augmentation; use augmentation=false.")
 
         if self.epochs < 1 or self.batch_size < 1 or self.patience < 1:
             raise ValueError("epochs, batch_size e patience devem ser >= 1.")
         if self.num_workers < 0:
             raise ValueError("num_workers deve ser >= 0.")
-        if self.learning_rate <= 0 or self.weight_decay < 0:
-            raise ValueError("learning_rate deve ser > 0 e weight_decay deve ser >= 0.")
+        if not math.isfinite(self.learning_rate) or self.learning_rate <= 0:
+            raise ValueError("learning_rate deve ser finita e > 0.")
+        for name in ("weight_decay", "l1_lambda", "l2_lambda"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} deve ser finito e >= 0.")
+        if not 0 <= self.label_smoothing < 1:
+            raise ValueError("label_smoothing deve estar no intervalo [0, 1).")
+        if self.gradient_clip is not None and (not math.isfinite(self.gradient_clip) or self.gradient_clip <= 0):
+            raise ValueError("gradient_clip deve ser finito e > 0, ou None.")
+        if self.final_epochs is not None and self.final_epochs < 1:
+            raise ValueError("final_epochs deve ser >= 1.")
         if self.search_trials is not None and self.search_trials < 1:
             raise ValueError("search_trials deve ser >= 1.")
 
@@ -57,7 +77,7 @@ class TrainingConfig:
 
     def to_dict(self) -> dict:
         values = asdict(self)
-        for name in ("dataset", "output_dir", "weights_dir", "search_config"):
+        for name in ("dataset", "output_dir", "weights_dir", "search_config", "reuse_search"):
             if values[name] is not None:
                 values[name] = str(values[name])
         return values
