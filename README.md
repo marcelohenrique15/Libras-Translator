@@ -77,6 +77,8 @@ libras-translator --train --config configs/resnet18.toml --search-trials 10
 
 O Optuna usa TPE e maximiza a média do F1 macro nas validações internas. O espaço padrão busca taxa de aprendizado, batch, limite de épocas, weight decay do AdamW, L1, L2, label smoothing, largura e quantidade de camadas do classificador, dropout e quais camadas da ResNet podem aprender. `epochs` limita cada treino interno; a duração final deriva das melhores épocas da configuração vencedora.
 
+O console mostra o protocolo por sinalizador, o orçamento e espaço da busca, a configuração completa antes de cada tentativa (inclusive ao retomar) e a configuração vencedora. O limite interno de épocas impresso na busca é convertido na duração final pela regra da mediana.
+
 Repetir o mesmo comando reutiliza o estudo, as divisões concluídas, o treinamento final e o teste quando ainda correspondem ao código, aos dados e à configuração. Treinos interrompidos retomam a partir de `last.pt`; uma época incompleta é repetida. O orçamento representa o total de tentativas **concluídas**, não novas tentativas a cada execução. Para ampliar a busca para quarenta no total:
 
 ```bash

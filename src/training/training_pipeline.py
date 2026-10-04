@@ -281,6 +281,9 @@ class TrainingPipeline():
     def _search(self, rows, test_signer: str, search: HyperparameterSearch, search_dir: Path) -> ModelSelection:
         writer = self._writer(search_dir, rows)
         study = search.create_study(search_dir, f"test_{test_signer}", self.config.seed)
+        validation_signers = self._validation_signers(rows, test_signer)
+        print(f"Protocolo da busca | teste reservado: {test_signer} | "
+              f"validação: {', '.join(validation_signers)} | {len(validation_signers)} divisão(ões) por tentativa", flush=True)
 
         def evaluate(candidate: TrainingConfig, number: int) -> float:
             pipeline = self._candidate_pipeline(candidate, rows)

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import tomllib
 
@@ -41,9 +42,16 @@ class HyperparameterSearch:
     def run(self, study: optuna.Study, base_config: TrainingConfig, evaluate, n_trials: int | None = None):
         target = n_trials if n_trials is not None else self.n_trials
         completed = len(study.get_trials(states=(TrialState.COMPLETE,)))
+        print(f"Busca Optuna | estudo: {study.study_name} | objetivo: maximizar F1-macro médio de validação", flush=True)
+        print("Configuração da busca:\n" + json.dumps({
+            "n_trials": target, "completed_trials": completed,
+            "sampler": "TPE", "n_startup_trials": self.n_startup_trials,
+            "parameters": self.parameters,
+        }, indent=2, ensure_ascii=False), flush=True)
         while completed < target:
             number, config = self._next_trial(study, base_config)
             print(f"Optuna: tentativa {number + 1} | {completed}/{target} concluídas.", flush=True)
+            print("Configuração desta tentativa:\n" + json.dumps(config.to_dict(), indent=2, ensure_ascii=False), flush=True)
             score = evaluate(config, number)
             study.tell(number, score)
             completed += 1
@@ -51,6 +59,9 @@ class HyperparameterSearch:
                 f"F1-macro validação={score:.4f} | melhor F1-macro={study.best_value:.4f}",
                 flush=True,
             )
+        winner_config = self.configuration(base_config, study.best_trial.params)
+        print(f"Melhor tentativa: {study.best_trial.number + 1}\nConfiguração vencedora da busca:\n"
+              + json.dumps(winner_config.to_dict(), indent=2, ensure_ascii=False), flush=True)
         return study.best_trial
 
     def configuration(self, base_config: TrainingConfig, parameters: dict) -> TrainingConfig:
