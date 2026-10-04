@@ -4,14 +4,12 @@ from pathlib import Path
 
 from torch import nn
 
-from models.landmark_lstm import LandmarkLSTM
 from models.sign_classifier import SignClassifier
 
 
 class ModelRegistry():
     MODELS = {
         "resnet18": SignClassifier,
-        "landmark_lstm": LandmarkLSTM,
     }
 
     # Público
@@ -37,7 +35,13 @@ class ModelRegistry():
                 "class_count é definido pelo manifesto."
             )
 
-        return model_class(class_count=class_count, **parameters)
+        model = model_class(class_count=class_count, **parameters)
+        output_format = getattr(model, "OUTPUT_FORMAT", "logits")
+        if output_format not in {"logits", "probabilities"}:
+            raise ValueError("OUTPUT_FORMAT deve ser 'logits' ou 'probabilities'.")
+        if output_format == "probabilities" and not callable(getattr(model, "forward_logits", None)):
+            raise ValueError("Modelos com OUTPUT_FORMAT='probabilities' precisam implementar forward_logits para o treino.")
+        return model
 
     @classmethod
     def get_class(cls, name: str) -> type[nn.Module]:

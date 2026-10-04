@@ -21,12 +21,8 @@ class SignDataset(Dataset):
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, int]:
         row = self.rows[index]
-        if self.training:
-            prepared = self.processor.prepare(row["sample_id"])
-            prepared = self.processor.augment(prepared)
-            inputs = self.processor.encode(prepared)
-        else:
-            inputs = self.processor.process(row["sample_id"])
+        # O mesmo processamento determinístico é usado em todas as divisões.
+        inputs = self.processor.process(row["sample_id"])
 
         label = self.class_to_index[row["class_id"]]
         return torch.from_numpy(inputs), label

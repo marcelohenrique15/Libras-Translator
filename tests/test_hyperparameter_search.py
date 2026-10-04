@@ -20,14 +20,21 @@ class HyperparameterSearchTests(unittest.TestCase):
             "[parameters]\n"
             "learning_rate = { type = 'float', low = 0.0001, high = 0.01, log = true }\n"
             "batch_size = [2, 4]\n"
+            "epochs = [1, 2]\n"
+            "l1_lambda = [0.0, 0.00001]\n"
+            "l2_lambda = [0.0, 0.0001]\n"
+            "label_smoothing = [0.0, 0.1]\n"
+            "gradient_clip = [0.5, 1.0]\n"
             "[parameters.model_options]\n"
             "hidden_size = [4, 8]\n"
+            "num_layers = [1, 2]\n"
+            "trainable_layers = ['fc', 'layer4,fc']\n"
             "[parameters.processor_options]\n"
             "frame_count = { type = 'int', low = 4, high = 8, step = 2 }\n"
         )
         self.search = HyperparameterSearch(self.path)
         self.config = TrainingConfig(
-            dataset=self.root / "dataset", model="landmark_lstm",
+            dataset=self.root / "dataset", model="resnet18",
             model_options={"hidden_size": 16, "dropout": 0.2},
             processor_options={"frame_count": 64, "augmentation": False},
             search_config=self.path, search_trials=3,
@@ -39,10 +46,17 @@ class HyperparameterSearchTests(unittest.TestCase):
     def test_configuration_preserves_options_and_clears_search(self):
         candidate = self.search.configuration(self.config, {
             "learning_rate": 0.002, "batch_size": 4,
+            "epochs": 2, "l1_lambda": 0.00001, "l2_lambda": 0.0001,
+            "label_smoothing": 0.1, "gradient_clip": 0.5,
             "model_options.hidden_size": 8, "processor_options.frame_count": 6,
         })
         self.assertEqual(candidate.learning_rate, 0.002)
         self.assertEqual(candidate.batch_size, 4)
+        self.assertEqual(candidate.epochs, 2)
+        self.assertEqual(candidate.l1_lambda, 0.00001)
+        self.assertEqual(candidate.l2_lambda, 0.0001)
+        self.assertEqual(candidate.label_smoothing, 0.1)
+        self.assertEqual(candidate.gradient_clip, 0.5)
         self.assertEqual(candidate.model_options, {"hidden_size": 8, "dropout": 0.2})
         self.assertEqual(candidate.processor_options, {"frame_count": 6, "augmentation": False})
         self.assertIsNone(candidate.search_config)
@@ -61,7 +75,14 @@ class HyperparameterSearchTests(unittest.TestCase):
             self.assertGreaterEqual(candidate.learning_rate, 0.0001)
             self.assertLessEqual(candidate.learning_rate, 0.01)
             self.assertIn(candidate.batch_size, [2, 4])
+            self.assertIn(candidate.epochs, [1, 2])
+            self.assertIn(candidate.l1_lambda, [0.0, 0.00001])
+            self.assertIn(candidate.l2_lambda, [0.0, 0.0001])
+            self.assertIn(candidate.label_smoothing, [0.0, 0.1])
+            self.assertIn(candidate.gradient_clip, [0.5, 1.0])
             self.assertIn(candidate.model_options["hidden_size"], [4, 8])
+            self.assertIn(candidate.model_options["num_layers"], [1, 2])
+            self.assertIn(candidate.model_options["trainable_layers"], [["fc"], ["layer4", "fc"]])
             self.assertIsInstance(candidate.processor_options["frame_count"], int)
             self.assertIn(candidate.processor_options["frame_count"], [4, 6, 8])
             self.assertIsNone(candidate.search_config)
@@ -130,13 +151,31 @@ class HyperparameterSearchTests(unittest.TestCase):
     def test_search_space_cannot_change_dataset_model_or_test_split(self):
         for name, choices in (
             ("dataset", "['other_dataset']"),
-            ("model", "['resnet18', 'landmark_lstm']"),
+            ("model", "['resnet18', 'external_model']"),
             ("test_signer_id", "['01', '02']"),
+            ("reuse_search", "['previous_search']"),
+            ("force_restart", "[true, false]"),
         ):
             with self.subTest(name=name):
                 self.path.write_text(f"[parameters]\n{name} = {choices}\n")
                 with self.assertRaises(ValueError):
                     HyperparameterSearch(self.path)
+
+    def test_trainable_layer_choices_are_converted_to_constructor_options(self):
+        candidate = self.search.configuration(self.config, {"model_options.trainable_layers": "layer4,fc"})
+        self.assertEqual(candidate.model_options["trainable_layers"], ["layer4", "fc"])
+        self.assertNotIn("trainable_layers", self.config.model_options)
+
+    def test_candidates_clear_imported_search_and_fixed_refit_controls(self):
+        base = self.config.with_overrides({
+            "reuse_search": self.root / "previous_search", "force_restart": True, "final_epochs": 12,
+        })
+        candidate = self.search.configuration(base, {"learning_rate": 0.001})
+        self.assertIsNone(candidate.final_epochs)
+        self.assertIsNone(candidate.reuse_search)
+        self.assertFalse(candidate.force_restart)
+        self.assertTrue(base.force_restart)
+        self.assertEqual(base.final_epochs, 12)
 
 
 if __name__ == "__main__":
