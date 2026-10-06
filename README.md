@@ -27,7 +27,7 @@ O preset ResNet18 já inclui a busca Optuna de `configs/search.toml` e reserva o
 4. Inicializar **um modelo novo** e treiná-lo em todos os sinalizadores fora do teste pelo número de épocas escolhido.
 5. Avaliar esse modelo no teste reservado e gerar métricas, tabelas e gráficos.
 
-Com os 12 sinalizadores atuais e 20 tentativas, são **220 treinamentos internos e um treinamento final** para o teste 05. O final usa os 11 sinalizadores disponíveis, sem validação ou early stopping: a duração já foi definida na etapa anterior. Não se escolhem configurações, épocas ou checkpoints pelo resultado do teste.
+Com os 12 sinalizadores atuais e 200 tentativas no espaço de busca para cluster, são **2.200 treinamentos internos e um treinamento final** para o teste 05. O final usa os 11 sinalizadores disponíveis, sem validação ou early stopping: a duração já foi definida na etapa anterior. Não se escolhem configurações, épocas ou checkpoints pelo resultado do teste.
 
 `--dataset` aceita uma pasta em `data/` ou um caminho. A forma `--train data/minds_libras` também funciona. Argumentos CLI substituem o TOML ou JSON carregado; opções específicas ficam em `model_options` e `processor_options`.
 
@@ -54,7 +54,7 @@ Sem escolher o teste, usa o sinalizador marcado no manifesto ou o primeiro ID di
 libras-translator --train --config configs/resnet18.toml --test-signer-id all
 ```
 
-Cada teste externo tem um estudo próprio. Com 12 sinalizadores e 20 tentativas por estudo, o LOPO completo custa **2.640 treinamentos internos + 12 finais = 2.652 treinamentos**. `--validation-signer-id` reduz a seleção a uma única pessoa de validação; o modelo final ainda treina em todas as pessoas fora do teste.
+Cada teste externo tem um estudo próprio. Com 12 sinalizadores e 200 tentativas por estudo, o LOPO completo custa **26.400 treinamentos internos + 12 finais = 26.412 treinamentos**. `--validation-signer-id` reduz a seleção a uma única pessoa de validação; o modelo final ainda treina em todas as pessoas fora do teste.
 
 ## Preparação por etapa
 
@@ -77,13 +77,15 @@ libras-translator --train --config configs/resnet18.toml --search-trials 10
 
 O Optuna usa TPE e maximiza a média do F1 macro nas validações internas. O espaço padrão busca taxa de aprendizado, batch, limite de épocas, weight decay do AdamW, L1, L2, label smoothing, largura e quantidade de camadas do classificador, dropout e quais camadas da ResNet podem aprender. `epochs` limita cada treino interno; a duração final deriva das melhores épocas da configuração vencedora.
 
+O espaço para cluster usa 200 tentativas, com 30 iniciais aleatórias. Explora cabeças de 1–4 camadas e 32–1.024 unidades, dropout de 0–0,7 e cinco opções de congelamento, incluindo liberar toda a ResNet. Os limites de épocas vão de 30 a 300 e a patience de 5 a 20. O comando acima, limitado a 10 tentativas, serve para uma verificação curta e fica inteiramente na fase aleatória. A busca continua sequencial, mesmo no cluster.
+
 O console mostra o protocolo por sinalizador, o orçamento e espaço da busca, a configuração completa antes de cada tentativa (inclusive ao retomar) e a configuração vencedora. O limite interno de épocas impresso na busca é convertido na duração final pela regra da mediana.
 
-Repetir o mesmo comando reutiliza o estudo, as divisões concluídas, o treinamento final e o teste quando ainda correspondem ao código, aos dados e à configuração. Treinos interrompidos retomam a partir de `last.pt`; uma época incompleta é repetida. O orçamento representa o total de tentativas **concluídas**, não novas tentativas a cada execução. Para ampliar a busca para quarenta no total:
+Repetir o mesmo comando reutiliza o estudo, as divisões concluídas, o treinamento final e o teste quando ainda correspondem ao código, aos dados e à configuração. Treinos interrompidos retomam a partir de `last.pt`; uma época incompleta é repetida. O orçamento representa o total de tentativas **concluídas**, não novas tentativas a cada execução. Para ampliar a busca para trezentas no total:
 
 ```bash
 libras-translator --train --config configs/resnet18.toml \
-  --search-trials 40
+  --search-trials 300
 ```
 
 Para executar uma nova busca e novos treinos sem apagar resultados anteriores:
