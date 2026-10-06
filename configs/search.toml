@@ -1,19 +1,32 @@
-# Cada tentativa usa as mesmas validações; Optuna maximiza o F1-macro médio.
-n_trials = 20
-n_startup_trials = 5
+# Busca para cluster: cada tentativa usa as mesmas validações por sinalizador.
+# Com teste 05 e 11 validações: 200 x 11 = 2.200 treinos internos + 1 final.
+# O pipeline executa as tentativas em sequência; não distribui a busca entre GPUs.
+n_trials = 200
+n_startup_trials = 30
 
 [parameters]
-learning_rate = {type = "float", low = 0.00001, high = 0.001, log = true}
-weight_decay = {type = "float", low = 0.0, high = 0.001}
-batch_size = [32, 64]
-# Limite da busca; o treino final usa a mediana das melhores épocas da vencedora.
-epochs = [15, 30, 45]
-l1_lambda = [0.0, 0.0000001, 0.000001]
-l2_lambda = [0.0, 0.000001, 0.00001]
-label_smoothing = [0.0, 0.05, 0.1]
+learning_rate = {type = "float", low = 0.000001, high = 0.003, log = true}
+# Inclui zero e diferentes ordens de grandeza para o weight decay do AdamW.
+weight_decay = [0.0, 0.000001, 0.00001, 0.0001, 0.0005, 0.001, 0.005, 0.01]
+batch_size = [16, 32, 64, 128]
+# São limites internos: early stopping pode encerrar muito antes.
+# O treino final usa a mediana das melhores épocas da vencedora.
+epochs = [30, 60, 100, 150, 200, 250, 300]
+patience = [5, 10, 15, 20]
+# Penalidades explícitas; zero permite avaliar cada técnica desligada.
+l1_lambda = [0.0, 0.00000001, 0.0000001, 0.000001, 0.00001]
+l2_lambda = [0.0, 0.00000001, 0.0000001, 0.000001, 0.00001, 0.0001]
+label_smoothing = [0.0, 0.025, 0.05, 0.1, 0.15, 0.2]
+gradient_clip = [0.5, 1.0, 2.0, 5.0]
 
 [parameters.model_options]
-hidden_size = [64, 128, 256]
-num_layers = [1, 2]
-dropout = {type = "float", low = 0.2, high = 0.6}
-trainable_layers = ["fc", "layer4,fc"]
+hidden_size = [32, 64, 128, 256, 512, 1024]
+# Quantidade de camadas ocultas do classificador; o backbone continua ResNet18.
+num_layers = {type = "int", low = 1, high = 4}
+dropout = {type = "float", low = 0.0, high = 0.7}
+# Da extração de features congeladas até o ajuste de todos os pesos da ResNet.
+trainable_layers = [
+    "fc",
+    "layer4,fc",
+    "layer3,layer4,fc",
+]
