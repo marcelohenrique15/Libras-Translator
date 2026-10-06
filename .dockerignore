@@ -1,0 +1,13 @@
+# Only these files belong in the image/build context. Keep datasets on volumes.
+**
+!Dockerfile
+!.dockerignore
+!pyproject.toml
+!README.md
+!src/
+!src/**
+!configs/
+!configs/**
+**/__pycache__
+**/*.pyc
+**/*.egg-info

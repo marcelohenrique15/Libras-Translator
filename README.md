@@ -149,6 +149,8 @@ Para adicionar modelos ou processors sem editar o pipeline, veja [como estender 
 
 ## Cluster
 
+Para executar em uma imagem própria com Python 3.12, sem venv e com dados em volumes, veja o [guia Docker](DOCKER.md). A imagem usa o UID/GID da pasta NFS informada; o banco Optuna continua em armazenamento local do nó.
+
 Prepare os dados e os pesos em um ambiente com acesso à rede antes do job. Os pesos ImageNet são baixados no primeiro uso; também podem ser copiados para `weights/checkpoints/`.
 
 Para treinar sem transferir os vídeos, copie `metadata/manifest.csv`, os CSVs de landmarks e `processed/landmarks/index.json`. Preserve as datas dos CSVs; o índice confirma a extração completa sem os vídeos originais.
