@@ -42,12 +42,15 @@ class TrainingPipeline():
         self.uses_landmarks = issubclass(processor_class, LandmarkProcessor)
         if self.uses_landmarks:
             processor_options.setdefault("augmentation", False)
+            processor_options.setdefault("anchor", "shoulders")
             representation = ModelRegistry.input_format(config.model)
             processor_options.setdefault("representation", representation)
             if processor_options["representation"] != representation:
                 raise ValueError(f"O modelo {config.model} recebe {representation}; ajuste processor_options.representation.")
         self.processor = ProcessorRegistry.create(config.processor, config.dataset, processor_options)
         self.processor_options = processor_options
+        # Salva as opções efetivas também nos trials e nas configurações finais.
+        self.config = config.with_overrides({"processor_options": processor_options})
 
     # Público
     def prepare(self, stage: str = "encode") -> list[dict[str, str]]:
@@ -336,7 +339,10 @@ class TrainingPipeline():
             if argument.default is not inspect.Parameter.empty
         }
         tuned_processor_options = set(metadata.get("parameters", {}).get("processor_options", {}))
-        fixed_options = (old_processor.keys() | self.processor_options.keys()) - {"augmentation"} - tuned_processor_options
+        allowed_changes = {"augmentation"}
+        if self.uses_landmarks:
+            allowed_changes.add("anchor")
+        fixed_options = (old_processor.keys() | self.processor_options.keys()) - allowed_changes - tuned_processor_options
         for name in fixed_options:
             old_value = old_processor.get(name, processor_defaults.get(name))
             current_value = self.processor_options.get(name, processor_defaults.get(name))
@@ -377,6 +383,12 @@ class TrainingPipeline():
             changes["optimizer"] = {"source": "adam", "current": "adamw"}
         if old_processor.get("augmentation", False):
             changes["augmentation"] = {"source": True, "current": False}
+        if self.uses_landmarks:
+            # Buscas anteriores à ancoragem usavam coordenadas da câmera.
+            old_anchor = old_processor.get("anchor", "none")
+            current_anchor = candidate.processor_options["anchor"]
+            if old_anchor != current_anchor:
+                changes["anchor"] = {"source": old_anchor, "current": current_anchor}
         # Campos adicionados após a busca antiga usam os valores atuais, explicitamente registrados.
         for name in ("l1_lambda", "l2_lambda", "label_smoothing", "gradient_clip"):
             old_value = winning_config.get(name, 0.0 if name != "gradient_clip" else None)

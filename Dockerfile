@@ -7,17 +7,6 @@ ARG TORCHVISION_VERSION=0.21.0
 ARG APP_UID=1004
 ARG APP_GID=1030
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    MPLBACKEND=Agg \
-    MPLCONFIGDIR=/tmp/libras-matplotlib \
-    XDG_CACHE_HOME=/tmp/libras-cache \
-    CUDA_CACHE_PATH=/tmp/libras-cuda \
-    NVIDIA_VISIBLE_DEVICES=all \
-    NVIDIA_DRIVER_CAPABILITIES=compute,utility
-
-WORKDIR /app
-
 # Runtime libraries used by OpenCV, MediaPipe and PyTorch.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libgomp1 \
@@ -28,21 +17,36 @@ RUN python -m pip install --no-cache-dir \
     "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" \
     --index-url "${TORCH_INDEX_URL}"
 
+WORKDIR /home/src/mhab/models
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONNOUSERSITE=1 \
+    PYTHONPATH=/home/src/mhab/models/src \
+    MPLBACKEND=Agg \
+    MPLCONFIGDIR=/home/src/mhab/models/.cache/matplotlib \
+    XDG_CACHE_HOME=/home/src/mhab/models/.cache \
+    CUDA_CACHE_PATH=/home/src/mhab/models/.cache/cuda \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
+# Keep the selected CUDA build when resolving the pyproject dependencies.
 RUN python -m pip install --no-cache-dir . \
+    "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" \
     && python -m pip check \
     && python -c "import cv2, mediapipe, matplotlib, numpy, optuna, pandas, scipy, torch, torchvision" \
-    && rm -rf /tmp/libras-matplotlib /tmp/libras-cache /tmp/libras-cuda \
-    && python -m pip freeze > /app/requirements-installed.txt
+    && python -m pip freeze > requirements-installed.txt
 
 COPY configs/ ./configs/
 
 # Match the NFS directory owner without modifying host users or permissions.
 RUN groupadd --gid "${APP_GID}" libras \
-    && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home libras \
-    && mkdir -p /app/data /app/runs /app/weights \
-    && chown libras:libras /app/data /app/runs /app/weights
+    && useradd --uid "${APP_UID}" --gid "${APP_GID}" \
+       --no-create-home --home-dir /home/src/mhab/models libras \
+    && mkdir -p data runs weights .cache/matplotlib .cache/cuda \
+    && chown -R libras:libras /home/src/mhab/models
 
 USER libras
 CMD ["/bin/bash"]

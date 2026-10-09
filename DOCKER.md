@@ -1,163 +1,145 @@
-# Imagem Docker para o cluster
+# Docker no cluster
 
-A imagem instala Python 3.12.15 e o projeto dentro do container, sem venv. O padrão é PyTorch 2.6.0 e torchvision 0.21.0 com CUDA 12.4, escolhido para o nó A100 com driver 550.54.15. Dados, caches processados, resultados e pesos ficam em volumes separados; não entram no contexto de build.
+A imagem `cluster_docker_image:latest` instala o projeto e suas dependências do `pyproject.toml`, sem venv. Ela usa Python 3.12.15, PyTorch 2.6.0 e torchvision 0.21.0 com CUDA 12.4.
 
-## 1. Construir
+O container `cluster01_primo07` monta apenas a pasta do projeto:
 
-Execute na raiz do projeto, em uma máquina com Docker disponível e acesso à internet. Estes comandos são para o host que executa Docker, não para o shell do container atual. Não é necessário instalar Python ou alterar contas no host.
+| Local | Caminho |
+|---|---|
+| Host do cluster | `/home/primo/src/mhab/models` |
+| Dentro do container | `/home/src/mhab/models` |
+
+Dados, caches, resultados e pesos ficam nessa pasta. O build não inclui esses arquivos; eles são acessados pela montagem do projeto. Não são necessários volumes nomeados nem pastas de trabalho externas.
+
+## 1. Construir a imagem atualizada
+
+Execute **no host do cluster, fora do container**, depois de enviar o projeto atualizado:
 
 ```bash
-sudo docker build -t libras-translator:cu124 .
+cd /home/primo/src/mhab/models && \
+sudo docker build -t cluster_docker_image:latest .
 ```
 
-A versão CUDA precisa ser compatível com o driver e a GPU do nó. Antes de escolher a variante para o cluster, consulte `nvidia-smi` no nó com GPU. A indicação de CUDA nesse comando descreve a capacidade do driver; não confirma a versão instalada dentro do container. A imagem já traz as bibliotecas CUDA do PyTorch; o host precisa ter driver NVIDIA e suporte existente a containers com GPU.
+O Docker instala as bibliotecas declaradas no `pyproject.toml`. O build verifica as dependências com `pip check` e testa os imports necessários. Um conflito com as versões fixadas de PyTorch ou torchvision interrompe o build.
 
-Para trocar a variante, mantenha um par compatível de versões de PyTorch e torchvision e selecione o índice oficial de wheels. Exemplo para uma imagem de CPU:
+Para adicionar uma biblioteca, declare-a no `pyproject.toml`, envie o arquivo atualizado e reconstrua a imagem. Bibliotecas instaladas manualmente em um container antigo não são incorporadas automaticamente à nova imagem.
+
+O usuário da imagem tem **UID 1004 e GID 1030**, compatíveis com a pasta do projeto no NFS. A criação da imagem não altera usuários, permissões ou instalações de Python no host.
+
+## 2. Testar antes de substituir o container
+
+Ainda no host, confira as dependências e a GPU na imagem nova:
 
 ```bash
-docker build -t libras-translator:cpu \
-  --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu .
+sudo docker run --rm --gpus all --shm-size=2g \
+  --user 1004:1030 \
+  --mount type=bind,source=/home/primo/src/mhab/models,target=/home/src/mhab/models \
+  -w /home/src/mhab/models \
+  cluster_docker_image:latest \
+  /bin/bash -c "python -m pip check && python -m cli.main --list-models && python -c 'import torch; print(\"PyTorch:\", torch.__version__, \"CUDA:\", torch.version.cuda); assert torch.cuda.is_available(), \"GPU indisponível\"; print(\"GPU:\", torch.cuda.get_device_name(0)); print(torch.ones(1, device=\"cuda\") + 1)'"
 ```
 
-Por padrão, o processo executa como **UID 1004 e GID 1030**, dono da pasta NFS que você mostrou. Isso não altera usuários nem permissões do host. Para outro proprietário, use `--build-arg APP_UID=... --build-arg APP_GID=...`, ou `--user UID:GID` ao executar. Criar a imagem e executá-la como esse usuário não concede permissões adicionais no NFS.
+Esse container de teste é removido automaticamente ao terminar. Se o comando falhar, corrija o problema antes de substituir `cluster01_primo07`.
 
-## 2. Conferir a imagem
+## 3. Recriar somente `cluster01_primo07`
+
+Antes de remover o container antigo, termine ou interrompa o treinamento e confira suas montagens:
 
 ```bash
-docker run --rm libras-translator:cu124 libras-translator --list-models
-docker run --rm --gpus all --entrypoint python libras-translator:cu124 \
-  -c 'import torch; print("PyTorch:", torch.__version__, "CUDA:", torch.version.cuda); assert torch.cuda.is_available(), "GPU indisponível"; print(torch.cuda.get_device_name(0)); print(torch.ones(1, device="cuda") + 1)'
+sudo docker inspect cluster01_primo07 \
+  --format '{{range .Mounts}}{{println .Type .Source "->" .Destination}}{{end}}'
 ```
 
-O segundo comando confirma que a GPU está disponível e executa uma operação nela. Para uma imagem CPU, omita `--gpus all` e faça essa conferência com `--entrypoint python ... -c 'import torch; print(torch.__version__)'`.
+Arquivos da pasta montada do projeto permanecem no host. Arquivos salvos apenas na camada interna do container serão perdidos na remoção; copie qualquer resultado necessário para `models/` antes de continuar, incluindo resultados antigos que ainda estejam em `/app`.
 
-## 3. Container interativo no cluster
-
-Depois de construir ou importar a imagem, execute **no host do cluster**. O comando segue o formato `docker run [OPTIONS] IMAGE [COMMAND]`, com os volumes que você já usa:
+Depois do teste da imagem e da conferência dos arquivos, execute no host:
 
 ```bash
+sudo docker stop cluster01_primo07 && \
+sudo docker rm cluster01_primo07 && \
 sudo docker run --gpus all \
-  --name cluster01_primo04 \
+  --name cluster01_primo07 \
   --shm-size=2g \
   --user 1004:1030 \
-  -v /home/primo/src:/home/src \
-  -v /data/primo:/home/data \
-  -v libras_primo04_runs:/app/runs \
-  -v libras_primo04_weights:/app/weights \
+  --mount type=bind,source=/home/primo/src/mhab/models,target=/home/src/mhab/models \
   -w /home/src/mhab/models \
-  -it libras-translator:cu124 /bin/bash
+  -it cluster_docker_image:latest /bin/bash
 ```
 
-`-w` define a pasta inicial do projeto; ajuste se ela estiver em outro caminho. A imagem aceita `/bin/bash` diretamente. O prompt usa o usuário `libras`, com as permissões do dono da pasta NFS; as dependências já estão instaladas.
+O comando remove somente o container indicado, sem `-v`, e recria o mesmo nome. O novo container inicia na pasta do projeto com as dependências já instaladas.
 
-Os dois volumes `libras_primo04_*` são criados pelo Docker e preservam resultados e pesos ao recriar o container. Confirme que o armazenamento do Docker está no disco local do nó, pois o SQLite do Optuna não deve ficar em NFS. Os volumes `/home/src` e `/home/data` mantêm os dados do cluster acessíveis.
-
-Dentro do container:
+Para voltar ao container depois de sair:
 
 ```bash
-python --version
-libras-translator --list-models
-libras-translator --train --config configs/resnet18.toml \
+sudo docker start -ai cluster01_primo07
+```
+
+Se ele já estiver rodando, abra outro shell:
+
+```bash
+sudo docker exec -it -w /home/src/mhab/models cluster01_primo07 /bin/bash
+```
+
+## 4. Pré-processar e treinar
+
+Execute **dentro do container**. A seleção, a interpolação, a ancoragem e a codificação usam CPU:
+
+```bash
+python -m cli.main \
+  --encode-landmarks \
+  --config configs/resnet18.toml \
   --dataset /home/src/mhab/models/data/minds_libras \
-  --test-signer-id 05 --device cuda:0 --num-workers 4 \
-  --output-dir /app/runs --weights-dir /app/weights
+  --anchor shoulders \
+  --imputation \
+  --device cpu
 ```
 
-Para liberar o nome de um container existente, sem apagar seu estado, pare-o quando não houver um treino em andamento e renomeie-o antes de executar o novo `docker run`:
+Para uma nova busca de hiperparâmetros seguida de treinamento final, teste e gráficos:
 
 ```bash
-sudo docker stop cluster01_primo04
-sudo docker rename cluster01_primo04 cluster01_primo04_anterior
+python -m cli.main \
+  --train \
+  --config configs/resnet18.toml \
+  --dataset /home/src/mhab/models/data/minds_libras \
+  --anchor shoulders \
+  --imputation \
+  --test-signer-id 05 \
+  --device cuda:0 \
+  --num-workers 4 \
+  --search-trials 200 \
+  --output-dir /home/src/mhab/models/runs \
+  --weights-dir /home/src/mhab/models/weights \
+  --force-restart
 ```
 
-Escolha outro sufixo se esse nome de backup já existir. Para voltar ao novo container depois de sair do shell:
+O treinamento também prepara os dados automaticamente. Caches válidos são reutilizados. `--force-restart` cria uma nova execução de busca e treinamento, preservando resultados anteriores e os caches de processamento. Com `pretrained = true`, os modelos começam dos pesos ImageNet.
+
+Cada uso de `--force-restart` cria outro diretório. Se precisar retomar uma execução, comece com um `--output-dir` exclusivo e sem essa opção; depois repita exatamente o mesmo comando. Não execute dois processos escrevendo no mesmo estudo ou nos mesmos caches.
+
+Os pesos iniciais podem ser enviados previamente para `weights/checkpoints/`; caso contrário, serão baixados no primeiro uso. O processor precisa de acesso de escrita à pasta `data/` para salvar seus caches.
+
+## Código, caches e ambiente
+
+A imagem define `PYTHONPATH=/home/src/mhab/models/src`. Assim, ao montar o projeto, o Python usa o código atualizado do host. Alterações em código e configurações ficam disponíveis para a próxima execução; alterações em dependências exigem reconstruir a imagem.
+
+O diretório inicial e o diretório pessoal do usuário `libras` apontam para `/home/src/mhab/models`. Os caches do Matplotlib, CUDA e bibliotecas que usam XDG ficam em `.cache/` dentro do projeto. Os resultados de treino usam `runs/`, e os pesos compartilhados usam `weights/`. Dependências do Python são instaladas em `/usr/local` dentro da imagem.
+
+O build registra as versões instaladas em `/home/src/mhab/models/requirements-installed.txt`. Como a montagem do projeto cobre esse arquivo no container de trabalho, consulte o registro diretamente na imagem, sem a montagem:
 
 ```bash
-sudo docker start -ai cluster01_primo04
+sudo docker run --rm --entrypoint cat \
+  cluster_docker_image:latest \
+  /home/src/mhab/models/requirements-installed.txt
 ```
 
-Os volumes novos não importam automaticamente arquivos do container antigo. Antes de retomar uma busca anterior, copie sua pasta completa de resultados para o novo volume. Para preservar os resultados em NFS após encerrar o treino, copie-os de `/app/runs/` para `/home/src/mhab/models/runs/` com Python ou uma ferramenta disponível no cluster.
-
-## 4. Treino direto com pastas de scratch
-
-No host, ajuste os dois caminhos abaixo. `LIBRAS_PROJECT` é o caminho do projeto **no host**, que pode ser diferente de `/home/src/mhab/models` dentro do container antigo. `LIBRAS_SCRATCH` deve estar em disco local do nó, gravável pelo UID 1004; não use NFS para o banco SQLite do Optuna.
+As dependências com intervalos no `pyproject.toml` podem resolver versões diferentes em reconstruções futuras. Registre o ID da imagem usada no experimento:
 
 ```bash
-LIBRAS_PROJECT=/home/primo/src/mhab/models
-LIBRAS_SCRATCH=/scratch/libras-mhab
-mkdir -p "$LIBRAS_SCRATCH/runs" "$LIBRAS_SCRATCH/weights"
-
-docker run --rm --gpus all --shm-size=2g \
-  --user 1004:1030 \
-  --mount "type=bind,source=$LIBRAS_PROJECT/data,target=/app/data" \
-  --mount "type=bind,source=$LIBRAS_SCRATCH/runs,target=/app/runs" \
-  --mount "type=bind,source=$LIBRAS_SCRATCH/weights,target=/app/weights" \
-  libras-translator:cu124 libras-translator \
-  --train --config configs/resnet18.toml \
-  --test-signer-id 05 --device cuda:0 --num-workers 4 \
-  --output-dir /app/runs --weights-dir /app/weights
+sudo docker image inspect cluster_docker_image:latest --format '{{.Id}}'
 ```
 
-Crie as pastas como o usuário que tem acesso ao NFS e ao scratch. O processo também precisa escrever em `data/`: o pipeline salva o índice dos landmarks e os caches de processamento, mesmo quando reaproveita os CSVs. Não monte essa pasta como somente leitura.
+### Banco Optuna no NFS
 
-Os pesos ImageNet são baixados no primeiro uso. Se o job não tiver internet, copie os pesos existentes para `$LIBRAS_SCRATCH/weights/checkpoints/` antes de iniciá-lo. O `--shm-size=2g` reserva memória compartilhada para o carregamento por workers; ajuste conforme os limites do nó.
+No cluster informado, `models/` está em NFS. Portanto, o banco SQLite do Optuna salvo em `runs/` também ficará no NFS. O Optuna desaconselha essa combinação por limitações de bloqueio de arquivos. Manter uma execução por estudo evita concorrência entre processos, mas não elimina a limitação do NFS; um backend de banco compatível exige configuração adicional no pipeline.
 
-O preset atual usa **200 tentativas Optuna**, com validação por pessoa. Para verificar o funcionamento antes dessa busca longa, use um diretório separado e acrescente `--search-trials 1 --validation-signer-id 01`. Isso ainda executa um treinamento interno, o final e o teste; não use seus resultados como seleção definitiva.
-
-Ao retomar, use a mesma imagem, os mesmos volumes e argumentos. O pipeline pode continuar a busca e os treinos interrompidos. O conteúdo de scratch persiste após remover o container, mas o cluster pode apagar esse disco entre jobs. Copie os resultados para armazenamento persistente quando o processo estiver parado; para retomada em outro nó, restaure a pasta inteira antes de iniciar.
-
-```bash
-mkdir -p "$LIBRAS_PROJECT/runs" "$LIBRAS_PROJECT/weights"
-rsync -a "$LIBRAS_SCRATCH/runs/" "$LIBRAS_PROJECT/runs/"
-rsync -a "$LIBRAS_SCRATCH/weights/" "$LIBRAS_PROJECT/weights/"
-```
-
-Use uma execução por busca/GPU. Não execute dois processos escrevendo nos mesmos resultados, banco ou caches de dados.
-
-## Configurações e dependências
-
-O código e os presets são copiados para a imagem. Após alterar o código, reconstrua a imagem. Para usar configurações atualizadas sem reconstruir, acrescente este volume ao `docker run`:
-
-```bash
---mount "type=bind,source=$LIBRAS_PROJECT/configs,target=/app/configs,readonly"
-```
-
-Python, PyTorch, torchvision e MediaPipe têm versões fixas. As outras dependências seguem os intervalos do `pyproject.toml`, portanto reconstruções futuras podem resolvê-las de forma diferente. A imagem registra as versões instaladas em `/app/requirements-installed.txt`:
-
-```bash
-docker run --rm --entrypoint cat libras-translator:cu124 /app/requirements-installed.txt
-```
-
-Para preservar exatamente o ambiente de um experimento, mantenha a imagem usada e registre seu ID junto com os resultados.
-
-## Transferir a imagem pronta
-
-Se você construir em outra máquina, pode transferir a imagem uma única vez, separada dos dados. A imagem CUDA pode ocupar vários GB.
-
-```bash
-docker save -o /tmp/libras-translator-cu124.tar libras-translator:cu124
-rsync -avhP -e "ssh -J mhab@192.168.155.9" \
-  /tmp/libras-translator-cu124.tar \
-  primo@192.168.155.1:/home/primo/src/mhab/
-```
-
-No host de destino com Docker disponível:
-
-```bash
-docker load -i /home/primo/src/mhab/libras-translator-cu124.tar
-```
-
-Nesta estação, o build pode ser feito com `podman build -t libras-translator:cu124 .`. Para transferir essa imagem ao Docker do cluster, exporte no formato Docker:
-
-```bash
-podman save --format docker-archive \
-  -o /tmp/libras-translator-cu124.tar localhost/libras-translator:cu124
-```
-
-Após o `docker load` no destino, ajuste o nome importado:
-
-```bash
-docker tag localhost/libras-translator:cu124 libras-translator:cu124
-```
-
-Fontes: [imagem oficial Python](https://hub.docker.com/_/python), [pares oficiais PyTorch/torchvision e variantes CUDA](https://pytorch.org/get-started/previous-versions/), [GPU em containers NVIDIA](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/docker-specialized.html) e [restrições do SQLite no Optuna](https://optuna.readthedocs.io/en/stable/faq.html).
+Fontes: [imagem oficial Python](https://hub.docker.com/_/python), [pares oficiais PyTorch/torchvision](https://pytorch.org/get-started/previous-versions/), [montagens de pastas no Docker](https://docs.docker.com/engine/storage/bind-mounts/), [GPU em containers NVIDIA](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/docker-specialized.html) e [restrições do SQLite no Optuna](https://optuna.readthedocs.io/en/stable/faq.html).

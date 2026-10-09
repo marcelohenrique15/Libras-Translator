@@ -102,6 +102,32 @@ class TrainingPipelineTests(unittest.TestCase):
         )
         return self._external_config().with_overrides({"search_config": space})
 
+    def _write_imported_landmark_search(self, pipeline, processor_options, tuned_options=None):
+        """Uma busca salva mínima permite testar a importação sem executar Optuna."""
+        source = self.project_root / "previous_landmark_search"
+        source.mkdir(exist_ok=True)
+        winning_config = pipeline.config.to_dict()
+        winning_config["processor_options"] = processor_options
+        winning_config["learning_rate"] = 0.002
+        folds = [
+            {"test_signer": "03", "validation_signer": signer, "best_epoch": 1,
+             "validation_f1_macro": 0.7}
+            for signer in pipeline._validation_signers(self.rows, "03")
+        ]
+        metadata = {
+            "base_config": winning_config, "divisions": {"03": [fold["validation_signer"] for fold in folds]},
+            "dataset_signature": pipeline._dataset_signature(self.rows), "protocol_version": 2,
+            "code_signature": pipeline._code_signature(),
+            "parameters": {"processor_options": tuned_options or {}},
+        }
+        report = {"best_trial": 7, "best_validation_f1_macro": 0.7}
+        trial = {"config": winning_config, "folds": folds, "run_id": "previous_run"}
+        for filename, contents in (
+            ("search_config.json", metadata), ("search_test03.json", report), ("trial_test03_7.json", trial),
+        ):
+            (source / filename).write_text(json.dumps(contents))
+        return source
+
     def test_processor_stages_cache_and_input_formats(self):
         sample_id = self.rows[0]["sample_id"]
         processor = LandmarkProcessor(self.root)
@@ -216,8 +242,13 @@ class TrainingPipelineTests(unittest.TestCase):
         self.assertEqual(summary["sessions"], 1)
         self.assertEqual(len(summary["folds"]), 1)
         self.assertEqual(summary["folds"][0]["test_signer"], "03")
+        self.assertEqual(summary["folds"][0]["config"]["processor_options"]["anchor"], "shoulders")
         final_dir = Path(summary["folds"][0]["run_dir"])
         self.assertTrue((final_dir / "final.pt").exists())
+        result = json.loads((final_dir / "result.json").read_text())
+        exported = json.loads((path.parent / "best_config_test03.json").read_text())
+        self.assertEqual(result["config"]["processor_options"]["anchor"], "shoulders")
+        self.assertEqual(exported["processor_options"]["anchor"], "shoulders")
         self.assertEqual(path.parent.parent, self.project_root / "runs" / "minds_libras")
         self.assertFalse((self.root / "processed" / "training").exists())
         self.assertEqual(Path(torch.hub.get_dir()), self.config.weights_dir)
@@ -509,6 +540,97 @@ class TrainingPipelineTests(unittest.TestCase):
             train[0]
         with self.assertRaises(ValueError):
             TrainingPipeline(self.config.with_overrides({"processor_options": {"augmentation": True}}))
+
+    def test_candidates_reuse_the_processor_only_when_anchor_matches(self):
+        with patch.object(LandmarkProcessor, "prepare_all", autospec=True) as prepare:
+            same = self.pipeline._candidate_pipeline(self.pipeline.config.with_overrides({"epochs": 2}), self.rows)
+            self.assertIs(same.processor, self.pipeline.processor)
+            prepare.assert_not_called()
+
+            options = {**self.pipeline.config.processor_options, "anchor": "nose"}
+            changed = self.pipeline._candidate_pipeline(
+                self.pipeline.config.with_overrides({"processor_options": options}), self.rows,
+            )
+            self.assertIsNot(changed.processor, self.pipeline.processor)
+            self.assertEqual(changed.processor.anchor_name, "nose")
+            self.assertNotEqual(changed.processor.encoding_dir, self.pipeline.processor.encoding_dir)
+            prepare.assert_called_once_with(changed.processor, self.rows)
+
+    def test_import_without_anchor_keeps_current_reference_and_marks_the_old_score(self):
+        for anchor in ("shoulders", "nose"):
+            with self.subTest(anchor=anchor):
+                pipeline = TrainingPipeline(self.config.with_overrides({"processor_options": {"anchor": anchor}}))
+                old_options = dict(pipeline.config.processor_options)
+                old_options.pop("anchor")
+                source = self._write_imported_landmark_search(pipeline, old_options)
+                imported = TrainingPipeline(pipeline.config.with_overrides({"reuse_search": source}))
+
+                selection = imported._import_selection(self.rows, "03")
+
+                self.assertEqual(selection.config.processor_options["anchor"], anchor)
+                self.assertEqual(selection.config.learning_rate, 0.002)
+                self.assertEqual(selection.protocol_changes, {"anchor": {"source": "none", "current": anchor}})
+                self.assertEqual(selection.score, 0.7)
+                # O score foi medido com outro processamento e não valida o novo.
+                self.assertTrue(selection.protocol_changes)
+                self.assertEqual(selection.final_config("03").processor_options["anchor"], anchor)
+
+    def test_import_preserves_the_winning_anchor_when_it_was_a_tuned_option(self):
+        old_options = {**self.pipeline.config.processor_options, "anchor": "nose"}
+        source = self._write_imported_landmark_search(
+            self.pipeline, old_options, tuned_options={"anchor": ["shoulders", "nose"]},
+        )
+        imported = TrainingPipeline(self.pipeline.config.with_overrides({"reuse_search": source}))
+
+        selection = imported._import_selection(self.rows, "03")
+
+        self.assertEqual(imported.processor_options["anchor"], "shoulders")
+        self.assertEqual(selection.config.processor_options["anchor"], "nose")
+        self.assertEqual(selection.protocol_changes, {})
+
+    def test_search_exports_the_effective_default_anchor_in_trial_and_final_configs(self):
+        space = self.project_root / "landmark_search.toml"
+        space.write_text("n_trials = 1\nn_startup_trials = 1\n[parameters]\nlearning_rate = [0.001]\n")
+        pipeline = TrainingPipeline(self.config.with_overrides({"search_config": space}))
+        folds = [
+            {"test_signer": "03", "validation_signer": signer, "best_epoch": 1,
+             "validation_f1_macro": 0.7}
+            for signer in ("01", "02")
+        ]
+        # Este teste cobre a persistência da configuração; o refit final continua real.
+        with patch.object(TrainingPipeline, "_train_folds", return_value=folds):
+            path = pipeline.train()
+
+        report = json.loads((path.parent / "search_test03.json").read_text())
+        trial = json.loads((path.parent / "trial_test03_0.json").read_text())
+        best = json.loads((path.parent / "best_config_test03.json").read_text())
+        result = json.loads(path.read_text())["folds"][0]
+        for config in (report["trials"][0]["config"], trial["config"], best, result["config"]):
+            self.assertEqual(config["processor_options"]["anchor"], "shoulders")
+            self.assertEqual(config["processor_options"]["representation"], "image")
+            self.assertFalse(config["processor_options"]["augmentation"])
+
+    def test_cli_anchor_override_is_saved_in_the_final_result(self):
+        path = self.project_root / "anchor_experiment.toml"
+        path.write_text(
+            "model = 'resnet18'\nepochs = 1\nfinal_epochs = 1\nbatch_size = 2\n"
+            "[model_options]\npretrained = false\nhidden_size = 8\n"
+            "[processor_options]\nanchor = 'none'\n"
+        )
+        args = [
+            "libras-translator", "--train", "--dataset", str(self.root), "--config", str(path),
+            "--anchor", "nose", "--device", "cpu", "--output-dir", str(self.project_root / "cli_runs"),
+            "--weights-dir", str(self.project_root / "weights"),
+        ]
+        with patch.object(sys, "argv", args):
+            main()
+
+        summaries = list((self.project_root / "cli_runs").rglob("summary.json"))
+        self.assertEqual(len(summaries), 1)
+        result = json.loads(summaries[0].read_text())["folds"][0]
+        self.assertEqual(result["config"]["processor_options"]["anchor"], "nose")
+        saved = json.loads((Path(result["run_dir"]) / "config.json").read_text())
+        self.assertEqual(saved["processor_options"]["anchor"], "nose")
 
     def test_cli_configuration_precedence(self):
         path = self.project_root / "experiment.toml"

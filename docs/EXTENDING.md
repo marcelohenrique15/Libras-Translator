@@ -81,7 +81,7 @@ Para os comandos por etapa, `prepare_all` recebe `stage="select"`, `"impute"` ou
 
 `prepare_all()` ocorre antes das divisões de treino, validação e teste. Use apenas transformações determinísticas por amostra, como normalização pelas medidas do próprio vídeo. Não ajuste média/desvio globais, PCA ou outras transformações aprendidas com todo o manifesto: isso vazaria informação entre divisões. Esses recursos exigem um contrato adicional que ajuste a transformação somente no treino de cada divisão, ainda não implementado.
 
-O processor padrão também expõe `prepare(sample_id)`, `encode(prepared)`, `select(sample_id)` e `impute(sample_id)` para modificar os passos separadamente. Um processor novo pode organizar seus métodos internos de outra forma, desde que cumpra o contrato acima.
+O processor padrão também expõe `prepare(sample_id)`, `encode(prepared)`, `select(sample_id)`, `impute(sample_id)` e `anchor(landmarks)` para modificar os passos separadamente. `impute()` conserva `NaN` nas lacunas não resolvidas. `prepare()` aplica a ancoragem fixa por vídeo (`anchor="shoulders"` por padrão); somente o encoder representa as ausências numericamente. `encode()` recebe pontos já preparados. Um processor novo pode organizar seus métodos internos de outra forma, desde que cumpra o contrato acima.
 
 ## Configuração e busca
 

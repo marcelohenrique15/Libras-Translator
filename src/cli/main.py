@@ -38,6 +38,8 @@ def main() -> None:
     parser.add_argument("--force-restart", action="store_true", default=None, help="Cria nova execução, sem reutilizar treinos nem apagar resultados anteriores")
     parser.add_argument("--subset", choices=("asl_2nd", "all", "arcanjo"))
     parser.add_argument("--frame-count", type=int)
+    parser.add_argument("--anchor", choices=("shoulders", "nose", "none"),
+                        help="Referência fixa por vídeo: centro dos ombros, nariz ou sem ancoragem")
     parser.add_argument("--imputation", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--augmentation", action=argparse.BooleanOptionalAction, default=None,
                         help="Compatibilidade: este experimento aceita somente --no-augmentation")
@@ -73,7 +75,7 @@ def main() -> None:
             parser.error("Informe o dataset no comando ou em --dataset, uma única vez.")
         overrides["dataset"] = getattr(args, action)
     processor_options = dict(config.processor_options)
-    for name in ("subset", "frame_count", "imputation", "augmentation"):
+    for name in ("subset", "frame_count", "anchor", "imputation", "augmentation"):
         if getattr(args, name) is not None:
             processor_options[name] = getattr(args, name)
     overrides["processor_options"] = processor_options

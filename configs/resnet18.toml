@@ -29,5 +29,6 @@ trainable_layers = ["layer4", "fc"]
 [processor_options]
 subset = "asl_2nd"
 imputation = true
+anchor = "shoulders"
 augmentation = false
 image_size = 224

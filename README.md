@@ -21,7 +21,7 @@ libras-translator --list-models
 
 O preset ResNet18 já inclui a busca Optuna de `configs/search.toml` e reserva o sinalizador **05** para teste. O protocolo é:
 
-1. Preparar manifesto, landmarks, seleção, imputação e codificação, reutilizando caches atuais.
+1. Preparar manifesto, landmarks, seleção, interpolação, ancoragem e codificação, reutilizando caches atuais.
 2. Buscar hiperparâmetros somente nos sinalizadores disponíveis para treinamento. Cada tentativa alterna a pessoa de validação; o teste externo permanece reservado.
 3. Escolher a configuração com maior **F1 macro médio de validação**. A mediana das melhores épocas de suas divisões define a duração do treinamento final, arredondando `.5` para cima.
 4. Inicializar **um modelo novo** e treiná-lo em todos os sinalizadores fora do teste pelo número de épocas escolhido.
@@ -41,6 +41,7 @@ O experimento usa processamento determinístico, **sem data augmentation**, em t
 | `--l1-lambda`, `--l2-lambda`, `--label-smoothing`, `--gradient-clip` | Penalidades explícitas, suavização de rótulos e clipping |
 | `--test-signer-id ID\|all`, `--validation-signer-id ID` | Divisão por sinalizador |
 | `--subset asl_2nd\|all\|arcanjo`, `--frame-count` | Pontos e tamanho das sequências |
+| `--anchor shoulders\|nose\|none` | Referência fixa por vídeo; padrão: centro dos ombros |
 | `--imputation` / `--no-imputation` | Processamento |
 | `--processor NOME` | Processor registrado ou `pacote.modulo:Classe` |
 | `--device auto\|cpu\|cuda:N`, `--num-workers`, `--seed` | Execução |
@@ -68,6 +69,25 @@ libras-translator --encode-landmarks --config configs/resnet18.toml
 ```
 
 `--build-manifest` recria o CSV; `--split-manifest` atualiza `set`, preservando as outras colunas. Etapas processadas usam cache por código e configuração. Arquivos incompletos são refeitos. Veja o [formato dos dados](data/README.md).
+
+### Coordenadas relativas e codificação
+
+O processor de landmarks usa `anchor = "shoulders"` por padrão. Após a interpolação opcional, calcula o ponto médio dos ombros em cada frame válido e usa a mediana desses centros como referência fixa do vídeo. Subtrai essa referência de todos os pontos, incluindo mãos e rosto, preservando os valores ausentes. Isso remove a posição média no enquadramento e mantém as trajetórias; não corrige escala ou rotação nem acompanha deslocamentos da pessoa durante o vídeo.
+
+Escolha a referência em `processor_options`:
+
+```toml
+[processor_options]
+anchor = "shoulders" # Centro dos ombros; padrão
+# anchor = "nose"   # Mediana da posição do nariz
+# anchor = "none"   # Coordenadas originais; processamento legado
+```
+
+Na representação de imagem, as coordenadas relativas usam o intervalo fixo `[-1, 1]`, com corte dos valores fora dele. Valores válidos viram intensidades de 1 a 255: a coordenada relativa zero vira 128, cinza médio. Ausências viram 0, preto. O encoder mantém três frames consecutivos nos canais RGB e redimensiona a imagem para 224 × 224; esse redimensionamento mistura cores vizinhas e não fornece uma máscara explícita de ausência. Na representação de sequência, as coordenadas continuam relativas e as ausências são preenchidas com zero antes da reamostragem temporal.
+
+A ancoragem exige **novo treinamento**. Os CSVs da extração continuam aproveitáveis; os caches das etapas seguintes têm identificação por código e opções, preservando os arquivos antigos. Para reproduzir o processamento de um modelo anterior, use explicitamente `anchor = "none"`.
+
+`prepare(sample_id)` retorna os pontos interpolados e ancorados, ainda com `NaN` nas ausências; `encode(prepared)` transforma esses pontos na entrada do modelo. `process(sample_id)` executa os dois passos e reutiliza o cache. Se não houver nenhum frame com uma referência completa, a preparação informa o erro e o ID da amostra.
 
 ## Busca de hiperparâmetros
 
@@ -105,6 +125,8 @@ libras-translator --train --config configs/resnet18.toml \
 
 Essa busca legada seleciona nove épocas finais. Ela usou outro protocolo: agora a augmentation está desativada e o otimizador é AdamW, além das opções novas de regularização. Seu F1 antigo descreve as validações de origem e **não valida o protocolo atual**. A importação registra essa origem; recomendamos a nova busca padrão para selecionar parâmetros no experimento atual.
 
+Também é possível importar hiperparâmetros de uma busca anterior à ancoragem. Nesse caso, o treino final usa a referência da configuração atual, e o resultado registra a mudança de processamento; o F1 da busca de origem não valida o modelo ancorado.
+
 O arquivo `best_config_test<ID>.json` já contém `final_epochs` e desativa a busca. Carregá-lo executa diretamente o treinamento final e o teste; use `--force-restart` para treinar um novo modelo mesmo se essa execução já existir:
 
 ```bash
@@ -135,7 +157,7 @@ As curvas finais não têm validação: o modelo recebe todos os dados de desenv
 ```text
 src/cli/              # argumentos e chamada das etapas
 src/dataset/          # manifesto, divisão e carregamento
-src/preprocessor/     # extração, seleção, imputação e codificação
+src/preprocessor/     # extração, seleção, interpolação, ancoragem e codificação
 src/models/           # arquiteturas e registry
 src/training/         # configuração, seleção, treino, busca, relatórios e pipeline
 configs/              # presets e espaços de busca
@@ -149,7 +171,7 @@ Para adicionar modelos ou processors sem editar o pipeline, veja [como estender 
 
 ## Cluster
 
-Para executar em uma imagem própria com Python 3.12, sem venv e com dados em volumes, veja o [guia Docker](DOCKER.md). A imagem usa o UID/GID da pasta NFS informada; o banco Optuna continua em armazenamento local do nó.
+Para construir `cluster_docker_image:latest` e recriar `cluster01_primo07` com as dependências do `pyproject.toml`, veja o [guia Docker](DOCKER.md). A imagem usa Python 3.12 e dispensa venv. Apenas `/home/primo/src/mhab/models` é montada no container; dados, caches, resultados e pesos ficam dentro do projeto.
 
 Prepare os dados e os pesos em um ambiente com acesso à rede antes do job. Os pesos ImageNet são baixados no primeiro uso; também podem ser copiados para `weights/checkpoints/`.
 
@@ -160,16 +182,17 @@ libras-translator --encode-landmarks --config configs/resnet18.toml
 libras-translator --train --config configs/resnet18.toml \
   --test-signer-id 05 \
   --device cuda:0 --num-workers 4 \
-  --output-dir /scratch/libras/runs --weights-dir /scratch/libras/weights
+  --output-dir /home/src/mhab/models/runs \
+  --weights-dir /home/src/mhab/models/weights
 ```
 
 Cada processo deve escrever em uma execução exclusiva. O projeto executa um processo por GPU; não distribui um treino entre GPUs nem envia jobs ao Slurm. `cuda:0` considera as GPUs visíveis para o processo.
 
-A busca Optuna executa tentativas em sequência. Use um processo por busca e mantenha `--output-dir` em armazenamento local do nó para o SQLite. Não compartilhe o mesmo banco entre processos nem use SQLite em NFS.
+A busca Optuna executa tentativas em sequência. Use um processo por busca e não compartilhe o mesmo banco entre processos. No cluster informado, a pasta do projeto está em NFS; o SQLite do Optuna nessa pasta tem limitações de bloqueio, descritas no [guia Docker](DOCKER.md#banco-optuna-no-nfs).
 
 ## Experimento de referência
 
-O preset ResNet usa ASL-2nd com 80 pontos e imputação, baseado no [artigo](https://arxiv.org/html/2510.24887v4). Na configuração base, apenas `layer4` e `fc` aprendem; as outras camadas e suas estatísticas de BatchNorm ficam congeladas. A busca também considera treinar somente `fc`.
+O preset ResNet usa ASL-2nd com 80 pontos e interpolação, baseado no [artigo](https://arxiv.org/html/2510.24887v4), e acrescenta a ancoragem fixa no centro dos ombros descrita acima. Na configuração base, apenas `layer4` e `fc` aprendem; as outras camadas e suas estatísticas de BatchNorm ficam congeladas. A busca também considera treinar somente `fc`.
 
 A ResNet termina em softmax para fornecer probabilidades. Durante o treinamento, `forward_logits()` entrega os valores anteriores ao softmax à cross-entropy, que calcula log-softmax de forma numericamente estável. O objetivo inclui label smoothing e as penalidades L1/L2 escolhidas; a loss registrada para comparação com a validação é a cross-entropy sem suavização ou penalidades.
 
