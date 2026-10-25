@@ -81,20 +81,18 @@ class TrainingPipeline():
         writer = self._writer(run_dir, rows)
         results = []
         for test_signer in self._test_signers(rows):
+            validation_signer = self._final_validation_signer(rows, test_signer)
             print(f"4. Seleção de configuração | teste reservado: {test_signer}", flush=True)
             if self.config.reuse_search is not None:
                 selection = self._import_selection(rows, test_signer)
             elif search is not None:
                 selection = self._search(rows, test_signer, search, run_dir)
-            elif self.config.final_epochs is not None:
-                selection = ModelSelection(self.config, [], None, "provided_config")
             else:
-                folds = self._train_folds(rows, test_signer)
-                selection = ModelSelection(
-                    self.config, folds, self._validation_score(folds), "fixed_config_validation",
-                    validation_run_dir=self._run_dir(rows),
-                )
-            writer.write_json(f"best_config_test{test_signer}.json", selection.final_config(test_signer).to_dict())
+                selection = ModelSelection(self.config, [], None, "provided_config")
+            final_config = selection.final_config(test_signer).with_overrides({
+                "final_validation_signer_id": validation_signer,
+            })
+            writer.write_json(f"best_config_test{test_signer}.json", final_config.to_dict())
             results.append(self._fit_and_test(rows, test_signer, selection, run_dir))
 
         path = run_dir / "summary.json"
@@ -134,6 +132,15 @@ class TrainingPipeline():
             return [self._signer_id(self.config.validation_signer_id, signers)]
         return signers
 
+    def _final_validation_signer(self, rows, test_signer: str) -> str:
+        """Escolhe a pessoa antes do treino, sem consultar métricas ou dados do teste."""
+        signers = sorted({row["signer_id"] for row in rows} - {test_signer})
+        requested = self.config.final_validation_signer_id or self.config.validation_signer_id
+        if requested is not None:
+            return self._signer_id(requested, signers)
+        # Maior cobertura de classes; IDs ordenados tornam o desempate determinístico.
+        return max(signers, key=lambda signer: len({row["class_id"] for row in rows if row["signer_id"] == signer}))
+
     def _signer_id(self, value: str, signers: list[str]) -> str:
         if value in signers:
             return value
@@ -157,6 +164,7 @@ class TrainingPipeline():
         for name in (
             "dataset", "output_dir", "weights_dir", "test_signer_id", "validation_signer_id",
             "search_config", "search_trials", "reuse_search", "force_restart", "final_epochs", "num_workers",
+            "final_validation_signer_id",
         ):
             settings.pop(name)
         return {
@@ -303,7 +311,9 @@ class TrainingPipeline():
         writer.write_json(f"search_test{test_signer}.json", report)
         trial_path = search_dir / f"trial_test{test_signer}_{winner.number}.json"
         trial = json.loads(trial_path.read_text(encoding="utf-8"))
-        candidate = search.configuration(self.config, winner.params)
+        candidate = search.configuration(self.config, winner.params).with_overrides({
+            "final_epochs": self.config.final_epochs,
+        })
         print(f"Vencedor: tentativa {winner.number + 1} | F1 validação={winner.value:.4f}", flush=True)
         return ModelSelection(
             candidate, trial["folds"], winner.value, str(trial_path.resolve()),
@@ -371,7 +381,7 @@ class TrainingPipeline():
         processor_options.update({name: old_processor[name] for name in tuned_processor_options if name in old_processor})
         overrides["processor_options"] = processor_options
         overrides.update({"search_config": None, "search_trials": None, "reuse_search": None,
-                          "force_restart": False, "final_epochs": None})
+                          "force_restart": False, "final_epochs": self.config.final_epochs})
         candidate = self.config.with_overrides(overrides)
         changes = {}
         if metadata.get("code_signature") != self._code_signature():
@@ -407,7 +417,7 @@ class TrainingPipeline():
         score = report["best_validation_f1_macro"]
         score_scope = "source_validation"
         if "epochs" in changes or "patience" in changes:
-            # Reaproveita os parâmetros, mas estima novamente a duração com a espera atual.
+            # Reaproveita os parâmetros e reavalia a seleção com os controles atuais.
             print(
                 f"Reavaliando o vencedor nas validações: teto={candidate.epochs}, patience={candidate.patience}. "
                 "Sem nova busca Optuna.", flush=True,
@@ -425,25 +435,29 @@ class TrainingPipeline():
 
     def _fit_and_test(self, rows, test_signer: str, selection: ModelSelection, run_dir: Path) -> dict:
         epoch_selection = selection.epoch_selection()
-        config = selection.final_config(test_signer)
+        validation_signer = self._final_validation_signer(rows, test_signer)
+        config = selection.final_config(test_signer).with_overrides({
+            "final_validation_signer_id": validation_signer,
+        })
         pipeline = self._candidate_pipeline(config, rows)
-        final_dir = run_dir / "final" / f"test_{test_signer}" / pipeline._run_id(rows)
+        final_dir = run_dir / "final" / f"test_{test_signer}" / f"val_{validation_signer}" / pipeline._run_id(rows)
         trainer = pipeline._writer(final_dir, rows)
         mapping = self._class_mapping(rows)
-        train_rows = [row for row in rows if row["signer_id"] != test_signer]
+        train_rows = [row for row in rows if row["signer_id"] not in {test_signer, validation_signer}]
+        validation_rows = [row for row in rows if row["signer_id"] == validation_signer]
         test_rows = [row for row in rows if row["signer_id"] == test_signer]
-        trainer.config.update({"test_signer": test_signer, "train_signers": sorted({row['signer_id'] for row in train_rows})})
+        trainer.config.update({
+            "test_signer": test_signer, "validation_signer": validation_signer,
+            "train_signers": sorted({row['signer_id'] for row in train_rows}),
+        })
         trainer.write_json("config.json", config.to_dict())
 
-        if epoch_selection["method"] == "median_best_epoch":
-            print(
-                f"Duração final selecionada pelas validações | melhores épocas: {epoch_selection['best_epochs']} | "
-                f"mediana: {config.epochs} épocas. A espera do early stopping não é acrescentada.",
-                flush=True,
-            )
-        else:
-            print(f"Duração final informada na configuração: {config.epochs} épocas.", flush=True)
-        print(f"5. Treino final | {len(train_rows)} vídeos | {config.epochs} épocas", flush=True)
+        print(
+            f"5. Treino final | treino: {len(train_rows)} vídeos | "
+            f"validação: {validation_signer} ({len(validation_rows)} vídeos) | "
+            f"teto: {config.epochs} épocas | patience: {config.patience} | melhor F1 de validação",
+            flush=True,
+        )
         training_path = final_dir / "training.json"
         if training_path.exists() and (final_dir / "final.pt").exists():
             training = json.loads(training_path.read_text(encoding="utf-8"))
@@ -453,7 +467,15 @@ class TrainingPipeline():
             if not (final_dir / "last.pt").exists():
                 print("Inicializando um novo modelo com os pesos definidos na configuração.", flush=True)
             model = pipeline._create_model(rows, load_checkpoint=(final_dir / "last.pt").exists())
-            training = trainer.fit(model, SignDataset(train_rows, pipeline.processor, mapping, training=True))
+            training = trainer.fit(
+                model, SignDataset(train_rows, pipeline.processor, mapping, training=True),
+                SignDataset(validation_rows, pipeline.processor, mapping),
+            )
+
+        epoch_selection.update({
+            "validation_signer": validation_signer, "best_epoch": training["best_epoch"],
+            "final_epochs": training["best_epoch"], "epochs_trained": training["epochs_trained"],
+        })
 
         print(f"6. Teste reservado | sinalizador {test_signer} | {len(test_rows)} vídeos", flush=True)
         test_path = final_dir / "test.json"
@@ -471,6 +493,14 @@ class TrainingPipeline():
                               selection.score_scope == "current_validation" or not selection.protocol_changes
                           )},
             "validation_f1_macro": selection.score, "training": training,
+            "final_validation_signer": validation_signer,
+            "final_validation_f1_macro": training["validation_f1_macro"],
+            "split": {
+                "train_signers": trainer.config["train_signers"],
+                "train_samples": [row["sample_id"] for row in train_rows],
+                "validation_signer": validation_signer,
+                "validation_samples": [row["sample_id"] for row in validation_rows],
+            },
             "test": test["metrics"], "test_samples": test["sample_ids"], "run_dir": str(final_dir.resolve()),
         }
         trainer.write_json("result.json", result)

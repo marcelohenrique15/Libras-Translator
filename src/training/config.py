@@ -12,6 +12,7 @@ class TrainingConfig:
     processor: str = "landmarks"
     test_signer_id: str | None = None
     validation_signer_id: str | None = None
+    final_validation_signer_id: str | None = None
     epochs: int = 1000
     batch_size: int = 64
     learning_rate: float = 0.0001

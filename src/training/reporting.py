@@ -123,7 +123,14 @@ class ExperimentReporter:
                 axis.plot(epochs, [row["train_objective"] for row in history], linestyle="--",
                           label="Objetivo de treino com regularização")
                 axis.lines[0].set_label("Perda de classificação")
-            self._format_curve(axis, "Treinamento final · duração fixada pela busca", ylabel)
+            has_validation = all(f"validation_{metric}" in row for row in history)
+            if has_validation:
+                axis.plot(epochs, [row[f"validation_{metric}"] for row in history], label="Validação")
+                best = max(history, key=lambda row: row["validation_f1_macro"])
+                axis.axvline(best["epoch"], color="tab:green", linestyle=":",
+                             label=f"Melhor F1 de validação: época {best['epoch']}")
+            title = "Treinamento final · early stopping por F1 de validação" if has_validation else "Treinamento final · duração fixa (histórico)"
+            self._format_curve(axis, title, ylabel)
             axis.legend()
             self._save(figure, filename)
 

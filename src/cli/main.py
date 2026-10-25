@@ -17,8 +17,9 @@ def main() -> None:
     parser.add_argument("--processor", help="Processador registrado ou pacote.modulo:Classe")
     parser.add_argument("--test-signer-id", help="ID de teste ou all para LOPO completo")
     parser.add_argument("--validation-signer-id", help="Executa apenas uma rodada de validação")
-    parser.add_argument("--epochs", type=int, help="Teto fixo das validações internas (padrão: 1000); não é sorteado pelo Optuna")
-    parser.add_argument("--final-epochs", type=int, help="Duração final já selecionada; dispensa validações internas sem busca")
+    parser.add_argument("--final-validation-signer-id", help="Pessoa de validação do treino final; padrão: maior cobertura de classes, desempate pelo ID")
+    parser.add_argument("--epochs", type=int, help="Teto das validações e do treino final (padrão: 1000); não é sorteado pelo Optuna")
+    parser.add_argument("--final-epochs", type=int, help="Teto opcional apenas do treino final, que continua usando validação e early stopping")
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--learning-rate", type=float)
     parser.add_argument("--weight-decay", type=float)
@@ -70,7 +71,7 @@ def main() -> None:
             config = TrainingConfig.from_toml(args.config)
 
     argument_names = (
-        "dataset", "dataset_format", "model", "processor", "test_signer_id", "validation_signer_id",
+        "dataset", "dataset_format", "model", "processor", "test_signer_id", "validation_signer_id", "final_validation_signer_id",
         "epochs", "final_epochs", "batch_size", "learning_rate", "weight_decay", "patience", "device", "num_workers",
         "l1_lambda", "l2_lambda", "label_smoothing", "gradient_clip",
         "seed", "output_dir", "weights_dir", "search_config", "search_trials", "reuse_search", "force_restart",

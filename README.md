@@ -23,11 +23,11 @@ O preset ResNet18 já inclui a busca Optuna de `configs/search.toml` e reserva o
 
 1. Preparar manifesto, landmarks, seleção, interpolação, ancoragem e codificação, reutilizando caches atuais.
 2. Buscar hiperparâmetros somente nos sinalizadores disponíveis para treinamento. Cada tentativa alterna a pessoa de validação; o teste externo permanece reservado.
-3. Escolher a configuração com maior **F1 macro médio de validação**. A mediana das melhores épocas de suas divisões define a duração do treinamento final, arredondando `.5` para cima.
-4. Inicializar **um modelo novo** e treiná-lo em todos os sinalizadores fora do teste pelo número de épocas escolhido.
-5. Avaliar esse modelo no teste reservado e gerar métricas, tabelas e gráficos.
+3. Escolher a configuração com maior **F1 macro médio de validação**.
+4. Reservar uma pessoa para validação final e inicializar **um modelo novo**. Treinar com as demais pessoas, excluindo também a do teste, com early stopping pelo F1 de validação.
+5. Recuperar os pesos da melhor época desse treino, avaliar uma vez no teste reservado e gerar métricas, tabelas e gráficos.
 
-Com os 12 sinalizadores atuais e 200 tentativas no espaço de busca para cluster, são **2.200 treinamentos internos e um treinamento final** para o teste 05. O final usa os 11 sinalizadores disponíveis, sem validação ou early stopping: a duração já foi definida na etapa anterior. Não se escolhem configurações, épocas ou checkpoints pelo resultado do teste.
+Com os 12 sinalizadores atuais e 200 tentativas no espaço de busca para cluster, são **2.200 treinamentos internos e um treinamento final** para o teste 05. Por padrão, o final reserva o sinalizador 01 para validação, usa os outros dez no treino e mantém o 05 no teste. A escolha automática usa a maior cobertura de classes entre as pessoas fora do teste, com desempate pelo ID; ela não consulta pontuações. `--final-validation-signer-id` permite uma escolha explícita, sem alterar as divisões internas do Optuna. Se apenas `--validation-signer-id` for informado, ele também será usado na validação final. Não se escolhem configurações, épocas ou checkpoints pelo resultado do teste.
 
 `--dataset` aceita uma pasta em `data/` ou um caminho. A forma `--train data/minds_libras` também funciona. Argumentos CLI substituem o TOML ou JSON carregado; opções específicas ficam em `model_options` e `processor_options`.
 
@@ -102,7 +102,7 @@ Cada treino interno tem teto padrão de **1.000 épocas** e espera **20 épocas 
 
 O espaço para cluster usa 200 tentativas, com 30 iniciais aleatórias. Explora cabeças de 1–4 camadas e 32–1.024 unidades, dropout de 0–0,7 e três opções de camadas treináveis: `fc`, `layer4,fc` e `layer3,layer4,fc`. O comando acima, limitado a 10 tentativas, serve para uma verificação curta e fica inteiramente na fase aleatória. A busca continua sequencial, mesmo no cluster.
 
-O console mostra o protocolo por sinalizador, o orçamento e espaço da busca, a configuração completa antes de cada tentativa (inclusive ao retomar) e a configuração vencedora. Cada época informa a espera acumulada; ao terminar, o log distingue early stopping do teto de épocas. Antes do treino final, imprime as melhores épocas das validações e a mediana escolhida, sem acrescentar a espera do early stopping. O treino final continua sem validação: usa a mediana das melhores épocas das divisões vencedoras, não a época em que cada divisão parou. Para deixar essa duração ser estimada automaticamente, use o preset sem informar `--final-epochs` nem carregar uma configuração final já exportada.
+O console mostra o protocolo por sinalizador, o orçamento e espaço da busca, a configuração completa antes de cada tentativa (inclusive ao retomar) e a configuração vencedora. Cada época informa a espera acumulada; ao terminar, o log distingue early stopping do teto de épocas. O treino final também monitora o F1 de validação: aguarda 20 épocas consecutivas sem superar o recorde, até o teto padrão de 1.000 épocas, e recupera os pesos de `best.pt`. `final.pt` guarda esses mesmos pesos; `last.pt` mantém o estado da última época executada para retomada. A duração final não deriva mais da mediana das divisões da busca. `--final-epochs` passa a ser apenas um teto opcional do treino final, mantendo validação e early stopping.
 
 Repetir o mesmo comando reutiliza o estudo, as divisões concluídas, o treinamento final e o teste quando ainda correspondem ao código, aos dados e à configuração. Treinos interrompidos retomam a partir de `last.pt`; uma época incompleta é repetida. O orçamento representa o total de tentativas **concluídas**, não novas tentativas a cada execução. Para ampliar a busca para trezentas no total:
 
@@ -135,13 +135,13 @@ libras-translator --train --config configs/resnet18.toml \
   --reuse-search runs/minds_libras/search_1cf0ec14bae0 --force-restart
 ```
 
-Ao importar uma busca cujo teto de épocas ou patience difere da configuração atual, o pipeline reavalia a configuração vencedora nas validações internas com os limites atuais, sem iniciar outra busca Optuna. As novas melhores épocas definem a duração final. A origem e as diferenças ficam registradas em `protocol_changes`; o F1 histórico descreve o protocolo de origem e **não valida o protocolo atual**.
+Ao importar uma busca cujo teto de épocas ou patience difere da configuração atual, o pipeline reavalia a configuração vencedora nas validações internas com os limites atuais, sem iniciar outra busca Optuna. A época do modelo final é escolhida pela validação do próprio treino final. A origem e as diferenças ficam registradas em `protocol_changes`; o F1 histórico descreve o protocolo de origem e **não valida o protocolo atual**.
 
 Buscas legadas também podem ter diferenças de augmentation, otimizador, regularização e código. A importação registra essas diferenças. A reavaliação do vencedor verifica essa configuração no protocolo atual; uma nova busca é necessária para comparar outras configurações sob esse protocolo.
 
 Também é possível importar hiperparâmetros de uma busca anterior à ancoragem. Nesse caso, o treino final usa a referência da configuração atual, e o resultado registra a mudança de processamento; o F1 da busca de origem não valida o modelo ancorado.
 
-O arquivo `best_config_test<ID>.json` já contém `final_epochs` e desativa a busca. Carregá-lo executa diretamente o treinamento final e o teste; use `--force-restart` para treinar um novo modelo mesmo se essa execução já existir:
+O arquivo `best_config_test<ID>.json` desativa a busca e registra o teto do treino final e sua pessoa de validação. Carregá-lo executa diretamente esse treino com validação e depois o teste; use `--force-restart` para treinar um novo modelo mesmo se essa execução já existir. Em arquivos antigos, `epochs` e `final_epochs` podem conter uma duração curta calculada pela mediana; use `--epochs 1000 --final-epochs 1000` para substituir esses limites:
 
 ```bash
 libras-translator --train --config caminho/best_config_test05.json --force-restart
@@ -151,20 +151,22 @@ Defina opções e intervalos no [arquivo de busca](configs/search.toml). O [guia
 
 ## Resultados
 
-O console informa o caminho de `summary.json`. Cada teste externo produz um diretório `final/test_<ID>/<execução>/` com:
+O console informa o caminho de `summary.json`. Cada teste externo produz um diretório `final/test_<ID>/val_<ID>/<execução>/` com:
 
 | Arquivo | Conteúdo |
 |---|---|
-| `final.pt`, `last.pt` | Modelo final e estado para retomada |
-| `config.json`, `training.json`, `result.json`, `test.json` | Configuração, seleção de épocas, origem da busca e métricas |
-| `history.json` | Épocas do treinamento final |
+| `best.pt`, `final.pt`, `last.pt` | Melhor checkpoint de validação, modelo final com esses mesmos pesos e estado da última época |
+| `config.json`, `training.json`, `validation.json`, `result.json`, `test.json` | Configuração, melhor época, parada, divisão de treino/validação/teste, origem da busca e métricas |
+| `history.json` | Métricas de treino e validação em cada época do treinamento final |
 | `predictions.csv`, `per_class.csv` | Previsões com confiança softmax e métricas por classe |
-| `graphs/loss.png`, `graphs/f1.png` | Cross-entropy, objetivo regularizado e F1 do treino final |
+| `graphs/loss.png`, `graphs/f1.png` | Curvas de treino e validação final, objetivo regularizado e indicação da melhor época pelo F1 |
 | `graphs/validation_loss.png`, `graphs/validation_f1_macro.png` | Curvas internas da configuração vencedora, quando disponíveis |
 | `graphs/search.png` | Evolução da busca Optuna, quando disponível |
 | `graphs/confusion_matrix*.png`, `graphs/per_class.png` | Matriz bruta, matriz normalizada por classe real e precisão/recall/F1 |
 
-As curvas finais não têm validação: o modelo recebe todos os dados de desenvolvimento. As curvas de validação pertencem aos treinamentos internos da busca. A confiança softmax é a probabilidade atribuída pelo modelo à classe prevista; não implica calibração de confiança.
+As curvas `loss.png` e `f1.png` usam o próprio treino final e sua validação. `validation_loss.png` e `validation_f1_macro.png` continuam mostrando as divisões internas da busca. Os resultados antigos de duração fixa permanecem legíveis, mas não possuem curvas de validação final; essas curvas exigem executar o novo protocolo. A confiança softmax é a probabilidade atribuída pelo modelo à classe prevista; não implica calibração de confiança.
+
+A pessoa de validação final pode ter participado das validações da busca; ela é um controle de desenvolvimento, não um segundo teste independente. Somente a pessoa reservada para teste mede a avaliação externa. Reservar validação final também reduz a quantidade de vídeos usados para ajustar os pesos e não garante melhora no teste.
 
 ## Organização e extensão
 
