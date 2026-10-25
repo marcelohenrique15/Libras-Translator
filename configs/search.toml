@@ -9,10 +9,8 @@ learning_rate = {type = "float", low = 0.000001, high = 0.003, log = true}
 # Inclui zero e diferentes ordens de grandeza para o weight decay do AdamW.
 weight_decay = [0.0, 0.000001, 0.00001, 0.0001, 0.0005, 0.001, 0.005, 0.01]
 batch_size = [16, 32, 64, 128]
-# São limites internos: early stopping pode encerrar muito antes.
-# O treino final usa a mediana das melhores épocas da vencedora.
-epochs = [30, 60, 100, 150, 200, 250, 300]
-patience = [5, 10, 15, 20]
+# epochs e patience são fixos na configuração do experimento (1000 e 20).
+# O early stopping seleciona as melhores épocas; elas não são sorteadas pelo Optuna.
 # Penalidades explícitas; zero permite avaliar cada técnica desligada.
 l1_lambda = [0.0, 0.00000001, 0.0000001, 0.000001, 0.00001]
 l2_lambda = [0.0, 0.00000001, 0.0000001, 0.000001, 0.00001, 0.0001]
@@ -24,7 +22,7 @@ hidden_size = [32, 64, 128, 256, 512, 1024]
 # Quantidade de camadas ocultas do classificador; o backbone continua ResNet18.
 num_layers = {type = "int", low = 1, high = 4}
 dropout = {type = "float", low = 0.0, high = 0.7}
-# Da extração de features congeladas até o ajuste de todos os pesos da ResNet.
+# Da extração de features congeladas até o ajuste dos dois últimos blocos da ResNet.
 trainable_layers = [
     "fc",
     "layer4,fc",

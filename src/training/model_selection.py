@@ -16,8 +16,10 @@ class ModelSelection:
     validation_run_dir: Path | None = None
     search_report: dict | None = None
     protocol_changes: dict = field(default_factory=dict)
+    score_scope: str = "current_validation"
 
     def epoch_selection(self) -> dict:
+        """Estima a duração final pelas melhores épocas, sem incluir a espera do early stopping."""
         if self.folds:
             best_epochs = [int(fold["best_epoch"]) for fold in self.folds]
             if any(epoch < 1 or epoch > self.config.epochs for epoch in best_epochs):

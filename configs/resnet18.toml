@@ -3,7 +3,8 @@ dataset_format = "minds_libras"
 model = "resnet18"
 processor = "landmarks"
 test_signer_id = "05"
-epochs = 30
+# Teto das validações internas; a duração final deriva das melhores épocas.
+epochs = 1000
 batch_size = 64
 learning_rate = 0.0001
 weight_decay = 0.0001
@@ -11,7 +12,8 @@ l1_lambda = 0.0
 l2_lambda = 0.0
 label_smoothing = 0.05
 gradient_clip = 1.0
-patience = 5
+# Épocas consecutivas sem superar o melhor F1 de validação.
+patience = 20
 device = "auto"
 num_workers = 0
 seed = 42

@@ -251,7 +251,7 @@ class TrainingPipeline():
             signer: self._validation_signers(rows, signer)
             for signer in self._test_signers(rows)
         }
-        # O orçamento fica fora da assinatura para ampliar o mesmo estudo depois.
+        # Só o total de tentativas fica fora da assinatura; epochs e patience identificam o estudo.
         search_signature = {
             "base_run": self._run_id(rows), "parameters": search.parameters,
             "dataset_signature": self._dataset_signature(rows), "protocol_version": 2,
@@ -394,16 +394,37 @@ class TrainingPipeline():
             old_value = winning_config.get(name, 0.0 if name != "gradient_clip" else None)
             if old_value != getattr(candidate, name):
                 changes[name] = {"source": old_value, "current": getattr(candidate, name)}
+        # O orçamento atual não é um hiperparâmetro importado de buscas antigas.
+        for name, old_default in (("epochs", 30), ("patience", 5)):
+            old_value = winning_config.get(name, base.get(name, old_default))
+            if old_value != getattr(candidate, name):
+                changes[name] = {"source": old_value, "current": getattr(candidate, name)}
         if changes:
             print("Importando hiperparâmetros de outro protocolo; o F1 da origem não estima o treino atual.", flush=True)
         print(f"Reutilizando vencedor da busca: {trial_path}", flush=True)
         source_runs = source.parent
+        validation_run_dir = source_runs / trial["run_id"]
+        score = report["best_validation_f1_macro"]
+        score_scope = "source_validation"
+        if "epochs" in changes or "patience" in changes:
+            # Reaproveita os parâmetros, mas estima novamente a duração com a espera atual.
+            print(
+                f"Reavaliando o vencedor nas validações: teto={candidate.epochs}, patience={candidate.patience}. "
+                "Sem nova busca Optuna.", flush=True,
+            )
+            pipeline = self._candidate_pipeline(candidate, rows)
+            folds = pipeline._train_folds(rows, test_signer)
+            score = self._validation_score(folds)
+            score_scope = "current_validation"
+            validation_run_dir = pipeline._run_dir(rows)
         return ModelSelection(
-            candidate, folds, report["best_validation_f1_macro"], str(trial_path),
-            validation_run_dir=source_runs / trial["run_id"], search_report=report, protocol_changes=changes,
+            candidate, folds, score, str(trial_path),
+            validation_run_dir=validation_run_dir, search_report=report,
+            protocol_changes=changes, score_scope=score_scope,
         )
 
     def _fit_and_test(self, rows, test_signer: str, selection: ModelSelection, run_dir: Path) -> dict:
+        epoch_selection = selection.epoch_selection()
         config = selection.final_config(test_signer)
         pipeline = self._candidate_pipeline(config, rows)
         final_dir = run_dir / "final" / f"test_{test_signer}" / pipeline._run_id(rows)
@@ -414,6 +435,14 @@ class TrainingPipeline():
         trainer.config.update({"test_signer": test_signer, "train_signers": sorted({row['signer_id'] for row in train_rows})})
         trainer.write_json("config.json", config.to_dict())
 
+        if epoch_selection["method"] == "median_best_epoch":
+            print(
+                f"Duração final selecionada pelas validações | melhores épocas: {epoch_selection['best_epochs']} | "
+                f"mediana: {config.epochs} épocas. A espera do early stopping não é acrescentada.",
+                flush=True,
+            )
+        else:
+            print(f"Duração final informada na configuração: {config.epochs} épocas.", flush=True)
         print(f"5. Treino final | {len(train_rows)} vídeos | {config.epochs} épocas", flush=True)
         training_path = final_dir / "training.json"
         if training_path.exists() and (final_dir / "final.pt").exists():
@@ -435,10 +464,12 @@ class TrainingPipeline():
             test = trainer.test(pipeline._create_model(rows, load_checkpoint=True), SignDataset(test_rows, pipeline.processor, mapping))
 
         result = {
-            "test_signer": test_signer, "config": config.to_dict(), "epoch_selection": selection.epoch_selection(),
+            "test_signer": test_signer, "config": config.to_dict(), "epoch_selection": epoch_selection,
             "selection": {"source": selection.source, "inner_folds": selection.folds,
-                          "score_scope": "source_validation", "protocol_changes": selection.protocol_changes,
-                          "score_valid_for_current_protocol": selection.score is not None and not bool(selection.protocol_changes)},
+                          "score_scope": selection.score_scope, "protocol_changes": selection.protocol_changes,
+                          "score_valid_for_current_protocol": selection.score is not None and (
+                              selection.score_scope == "current_validation" or not selection.protocol_changes
+                          )},
             "validation_f1_macro": selection.score, "training": training,
             "test": test["metrics"], "test_samples": test["sample_ids"], "run_dir": str(final_dir.resolve()),
         }

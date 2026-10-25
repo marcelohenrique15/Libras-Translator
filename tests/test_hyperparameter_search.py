@@ -20,7 +20,6 @@ class HyperparameterSearchTests(unittest.TestCase):
             "[parameters]\n"
             "learning_rate = { type = 'float', low = 0.0001, high = 0.01, log = true }\n"
             "batch_size = [2, 4]\n"
-            "epochs = [1, 2]\n"
             "l1_lambda = [0.0, 0.00001]\n"
             "l2_lambda = [0.0, 0.0001]\n"
             "label_smoothing = [0.0, 0.1]\n"
@@ -46,13 +45,14 @@ class HyperparameterSearchTests(unittest.TestCase):
     def test_configuration_preserves_options_and_clears_search(self):
         candidate = self.search.configuration(self.config, {
             "learning_rate": 0.002, "batch_size": 4,
-            "epochs": 2, "l1_lambda": 0.00001, "l2_lambda": 0.0001,
+            "l1_lambda": 0.00001, "l2_lambda": 0.0001,
             "label_smoothing": 0.1, "gradient_clip": 0.5,
             "model_options.hidden_size": 8, "processor_options.frame_count": 6,
         })
         self.assertEqual(candidate.learning_rate, 0.002)
         self.assertEqual(candidate.batch_size, 4)
-        self.assertEqual(candidate.epochs, 2)
+        self.assertEqual(candidate.epochs, 1000)
+        self.assertEqual(candidate.patience, 20)
         self.assertEqual(candidate.l1_lambda, 0.00001)
         self.assertEqual(candidate.l2_lambda, 0.0001)
         self.assertEqual(candidate.label_smoothing, 0.1)
@@ -75,7 +75,8 @@ class HyperparameterSearchTests(unittest.TestCase):
             self.assertGreaterEqual(candidate.learning_rate, 0.0001)
             self.assertLessEqual(candidate.learning_rate, 0.01)
             self.assertIn(candidate.batch_size, [2, 4])
-            self.assertIn(candidate.epochs, [1, 2])
+            self.assertEqual(candidate.epochs, 1000)
+            self.assertEqual(candidate.patience, 20)
             self.assertIn(candidate.l1_lambda, [0.0, 0.00001])
             self.assertIn(candidate.l2_lambda, [0.0, 0.0001])
             self.assertIn(candidate.label_smoothing, [0.0, 0.1])
@@ -99,6 +100,21 @@ class HyperparameterSearchTests(unittest.TestCase):
         self.assertEqual(winner.state, TrialState.COMPLETE)
         self.assertIn("model_options.hidden_size", winner.params)
         self.assertIn("processor_options.frame_count", winner.params)
+        for trial in study.trials:
+            self.assertNotIn("epochs", trial.params)
+            self.assertNotIn("patience", trial.params)
+
+    def test_candidates_keep_the_explicit_training_budget_outside_the_search(self):
+        base = self.config.with_overrides({"epochs": 40, "patience": 7})
+        candidate = self.search.configuration(base, {"learning_rate": 0.002})
+        self.assertEqual(candidate.epochs, 40)
+        self.assertEqual(candidate.patience, 7)
+
+    def test_trial_parameters_cannot_override_the_fixed_training_budget(self):
+        for name in ("epochs", "patience"):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, name):
+                    self.search.configuration(self.config, {name: 5})
 
     def test_completed_trials_are_reused_and_budget_is_total(self):
         study = self._study()
@@ -155,6 +171,8 @@ class HyperparameterSearchTests(unittest.TestCase):
             ("test_signer_id", "['01', '02']"),
             ("reuse_search", "['previous_search']"),
             ("force_restart", "[true, false]"),
+            ("epochs", "[100, 1000]"),
+            ("patience", "[5, 20]"),
         ):
             with self.subTest(name=name):
                 self.path.write_text(f"[parameters]\n{name} = {choices}\n")

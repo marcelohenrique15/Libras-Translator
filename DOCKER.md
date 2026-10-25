@@ -114,7 +114,15 @@ python -m cli.main \
 
 O treinamento também prepara os dados automaticamente. Caches válidos são reutilizados. `--force-restart` cria uma nova execução de busca e treinamento, preservando resultados anteriores e os caches de processamento. Com `pretrained = true`, os modelos começam dos pesos ImageNet.
 
-Cada uso de `--force-restart` cria outro diretório. Se precisar retomar uma execução, comece com um `--output-dir` exclusivo e sem essa opção; depois repita exatamente o mesmo comando. Não execute dois processos escrevendo no mesmo estudo ou nos mesmos caches.
+Cada uso de `--force-restart` cria outro diretório. Para retomar automaticamente a busca mais recente, inclusive uma iniciada com essa opção, execute dentro do container:
+
+```bash
+python -m cli.main --train --resume-search \
+  --dataset /home/src/mhab/models/data/minds_libras \
+  --output-dir /home/src/mhab/models/runs
+```
+
+A retomada restaura a configuração e o melhor resultado já salvo, continua as tentativas pendentes e depois executa treino final, teste e gráficos. Ela confere a compatibilidade antes de treinar; não inclua `--force-restart` ou `--reuse-search`. Não execute dois processos escrevendo no mesmo estudo ou nos mesmos caches.
 
 Os pesos iniciais podem ser enviados previamente para `weights/checkpoints/`; caso contrário, serão baixados no primeiro uso. O processor precisa de acesso de escrita à pasta `data/` para salvar seus caches.
 

@@ -439,6 +439,43 @@ class TrainingPipelineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             TrainingPipeline(imported).train()
 
+    def test_imported_search_revalidates_winner_when_the_training_budget_changes(self):
+        config = self._search_config(trials=1).with_overrides({"epochs": 1, "patience": 2})
+        original_path = TrainingPipeline(config).train()
+        source = json.loads(original_path.read_text())["folds"][0]
+        imported = config.with_overrides({
+            "reuse_search": original_path.parent, "search_config": None,
+            "epochs": 5, "patience": 20, "output_dir": self.project_root / "imported_runs",
+        })
+        revalidated = []
+
+        def validation_result(trainer, model, train, validation):
+            self.assertNotIn("03", {row["signer_id"] for row in train.rows + validation.rows})
+            self.assertEqual(trainer.config["epochs"], 5)
+            self.assertEqual(trainer.config["patience"], 20)
+            self.assertEqual(trainer.config["learning_rate"], source["config"]["learning_rate"])
+            revalidated.append(trainer.config["validation_signer"])
+            return {
+                "best_epoch": 3, "validation_accuracy": 0.75,
+                "validation_f1_macro": 0.75, "epochs_trained": 5,
+            }
+
+        with patch("training.training_pipeline.HyperparameterSearch.run", side_effect=AssertionError("Optuna repetido")):
+            with patch.object(Trainer, "train", validation_result):
+                path = TrainingPipeline(imported).train()
+        result = json.loads(path.read_text())["folds"][0]
+        changes = result["selection"]["protocol_changes"]
+        self.assertEqual(changes["epochs"], {"source": 1, "current": 5})
+        self.assertEqual(changes["patience"], {"source": 2, "current": 20})
+        self.assertEqual(sorted(revalidated), ["01", "02"])
+        self.assertEqual(result["epoch_selection"]["best_epochs"], [3, 3])
+        self.assertEqual(result["config"]["epochs"], 3)
+        self.assertEqual(result["training"]["epochs_trained"], 3)
+        self.assertEqual(result["config"]["patience"], 20)
+        self.assertEqual(result["selection"]["score_scope"], "current_validation")
+        self.assertTrue(result["selection"]["score_valid_for_current_protocol"])
+        self.assertEqual(result["validation_f1_macro"], 0.75)
+
     def test_import_search_rejects_changed_dataset_before_refit(self):
         config = self._search_config(trials=1)
         original_path = TrainingPipeline(config).train()

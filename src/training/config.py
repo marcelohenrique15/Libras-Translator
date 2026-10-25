@@ -12,7 +12,7 @@ class TrainingConfig:
     processor: str = "landmarks"
     test_signer_id: str | None = None
     validation_signer_id: str | None = None
-    epochs: int = 30
+    epochs: int = 1000
     batch_size: int = 64
     learning_rate: float = 0.0001
     weight_decay: float = 0.0001
@@ -20,7 +20,7 @@ class TrainingConfig:
     l2_lambda: float = 0.0
     label_smoothing: float = 0.0
     gradient_clip: float | None = 1.0
-    patience: int = 5
+    patience: int = 20
     final_epochs: int | None = None
     device: str = "auto"
     num_workers: int = 0

@@ -95,7 +95,6 @@ n_trials = 20
 [parameters]
 learning_rate = { type = "float", low = 0.00001, high = 0.001, log = true }
 batch_size = [32, 64]
-epochs = [15, 30]
 weight_decay = [0.0, 0.0001, 0.001]
 l1_lambda = [0.0, 0.0000001]
 l2_lambda = [0.0, 0.000001]
@@ -108,13 +107,13 @@ channels = [32, 64]
 frame_count = { type = "int", low = 32, high = 96, step = 16 }
 ```
 
-Use somente opções aceitas pelo modelo e processor. Os campos gerais ajustáveis são `learning_rate`, `weight_decay`, `batch_size`, `epochs`, `patience`, `l1_lambda`, `l2_lambda`, `label_smoothing` e `gradient_clip`. Modelo, processor, dataset e divisões permanecem fixos no estudo. O espaço ResNet também busca `hidden_size`, `num_layers`, `dropout` e `trainable_layers`; essa quantidade de camadas se refere ao classificador, mantendo o backbone ResNet18.
+Use somente opções aceitas pelo modelo e processor. Os campos gerais ajustáveis na busca são `learning_rate`, `weight_decay`, `batch_size`, `l1_lambda`, `l2_lambda`, `label_smoothing` e `gradient_clip`. Modelo, processor, dataset e divisões permanecem fixos no estudo. `epochs` e `patience` são controles de execução definidos no preset ou CLI, fora do espaço Optuna; seus padrões são 1.000 e 20. O espaço ResNet também busca `hidden_size`, `num_layers`, `dropout` e `trainable_layers`; essa quantidade de camadas se refere ao classificador, mantendo o backbone ResNet18.
 
 Categorias Optuna devem ser escalares. Para `model_options.trainable_layers`, use strings como `"fc"` e `"layer4,fc"`; a configuração converte cada uma em uma lista de camadas. Outras opções específicas são passadas ao construtor sem adaptação.
 
-O TPE sugere configurações usando o histórico e maximiza o **F1 macro médio de validação**. Todas as classes do manifesto entram na média, inclusive classes sem acertos. Cada tentativa treina em pessoas diferentes das usadas para validação, sempre excluindo a pessoa do teste externo. O maior F1 de validação seleciona `best.pt` e controla o early stopping interno.
+O TPE sugere configurações usando o histórico e maximiza o **F1 macro médio de validação**. Todas as classes do manifesto entram na média, inclusive classes sem acertos. Cada tentativa treina em pessoas diferentes das usadas para validação, sempre excluindo a pessoa do teste externo. O F1 de validação é monitorado em todas as épocas: somente um valor estritamente maior que o melhor anterior salva `best.pt` e zera o contador de espera. Queda, empate e recuperação sem superar o melhor resultado incrementam o contador. Com `patience=20`, vinte épocas consecutivas sem um novo melhor F1 encerram a divisão, preservando o checkpoint vencedor. O log informa o contador e distingue essa parada do encerramento pelo teto de épocas.
 
-A configuração vencedora passa a `ModelSelection`. A mediana de suas melhores épocas, arredondando `.5` para cima, define `final_epochs`; `epochs` na busca é o limite máximo de cada divisão. O pipeline cria um modelo novo, treina todos os sinalizadores fora do teste por essa duração fixa, salva `final.pt` e só então avalia o teste. Esse treino final não contém validação nem seleção de época pelo teste. Com `pretrained=true`, o modelo novo parte novamente dos pesos pré-treinados, sem copiar checkpoints das validações.
+A configuração vencedora passa a `ModelSelection`. A mediana de suas melhores épocas, arredondando `.5` para cima, define `final_epochs`; ela usa a época do melhor checkpoint, não a época de parada. O teto `epochs=1000` não obriga cada divisão a completar mil épocas. O pipeline cria um modelo novo, treina todos os sinalizadores fora do teste por essa duração fixa, salva `final.pt` e só então avalia o teste. Esse treino final não contém validação, early stopping nem seleção de época pelo teste. Com `pretrained=true`, o modelo novo parte novamente dos pesos pré-treinados, sem copiar checkpoints das validações.
 
 O trainer usa AdamW. `weight_decay` é desacoplado do objetivo; `l1_lambda` e `l2_lambda` acrescentam somas de valores absolutos e quadrados dos pesos. As três penalizações excluem parâmetros congelados, bias e normalização. A busca pode combinar penalizações; valores altos podem prejudicar o ajuste, por isso compare usando validação. Label smoothing modifica o objetivo de classificação no treino. Os registros distinguem `train_loss` (cross-entropy comum, comparável à validação) de `train_objective` (suavização e penalidades explícitas).
 
@@ -130,9 +129,11 @@ Sem `search_config` e sem `final_epochs`, o pipeline valida uma configuração f
 
 Código, dados ou configurações que afetam um resultado identificam uma nova execução; caches de etapas anteriores são reutilizados quando continuam atuais. `last.pt` preserva época, otimizador e geradores aleatórios. A retomada começa na próxima época; uma época interrompida é repetida. Os modos de validação e treino final usam diretórios separados.
 
-`--force-restart` cria um diretório novo `fresh_<id>`, sem apagar artefatos ou reutilizar treinos anteriores. Os caches de pré-processamento continuam disponíveis. Combine com `--reuse-search caminho/da/busca` para importar somente a configuração vencedora e refazer o treinamento final; a importação confere dataset, modelo, processor, divisões e processamento.
+`--force-restart` cria um diretório novo `fresh_<id>`, sem apagar artefatos ou reutilizar treinos anteriores. Os caches de pré-processamento continuam disponíveis. Combine com `--reuse-search caminho/da/busca` para importar a configuração vencedora e refazer o treinamento final; a importação confere dataset, modelo, processor, divisões e processamento.
 
-Buscas legadas podem ser importadas, preservando os arquivos de origem e registrando a procedência em `result.json`. A importação compara também a assinatura do código e a semente. Mudanças de código, semente, augmentation, otimizador ou regularização, assim como uma origem legada sem assinatura verificável, marcam o score de origem como inválido para o protocolo atual. Os parâmetros ainda podem servir como ponto de partida; para validar essas escolhas, execute uma busca nova.
+Se a busca importada usou outro teto de épocas ou outra patience, o pipeline reavalia seu vencedor nas divisões internas com os controles atuais, sem executar outra busca Optuna. A mediana das novas melhores épocas define `final_epochs`; os controles anteriores não substituem os atuais. As diferenças e a origem são registradas em `protocol_changes`. Após a reavaliação, `score_scope=current_validation` e `score_valid_for_current_protocol=true` descrevem o novo F1; o F1 histórico continua restrito ao protocolo de origem.
+
+Buscas legadas podem ser importadas, preservando os arquivos de origem e registrando a procedência em `result.json`. A importação compara também a assinatura do código e a semente. Mudanças de código, semente, augmentation, otimizador ou regularização, assim como uma origem legada sem assinatura verificável, marcam o score de origem como inválido para o protocolo atual. Os parâmetros ainda podem servir como ponto de partida. A reavaliação do vencedor verifica uma configuração fixa; para comparar outras escolhas sob o protocolo atual, execute uma busca nova.
 
 `ExperimentReporter` recebe o histórico final, métricas de teste, probabilidades por amostra e, opcionalmente, o relatório Optuna e os históricos das validações vencedoras. Ele escreve CSVs e gráficos com Agg, sem interface gráfica. As curvas finais de loss/F1 ficam separadas das curvas internas de validação; matrizes de confusão e métricas por classe usam somente o teste final.
 

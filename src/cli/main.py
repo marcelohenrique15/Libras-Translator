@@ -17,7 +17,7 @@ def main() -> None:
     parser.add_argument("--processor", help="Processador registrado ou pacote.modulo:Classe")
     parser.add_argument("--test-signer-id", help="ID de teste ou all para LOPO completo")
     parser.add_argument("--validation-signer-id", help="Executa apenas uma rodada de validação")
-    parser.add_argument("--epochs", type=int)
+    parser.add_argument("--epochs", type=int, help="Teto fixo das validações internas (padrão: 1000); não é sorteado pelo Optuna")
     parser.add_argument("--final-epochs", type=int, help="Duração final já selecionada; dispensa validações internas sem busca")
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--learning-rate", type=float)
@@ -26,7 +26,7 @@ def main() -> None:
     parser.add_argument("--l2-lambda", type=float)
     parser.add_argument("--label-smoothing", type=float)
     parser.add_argument("--gradient-clip", type=float)
-    parser.add_argument("--patience", type=int)
+    parser.add_argument("--patience", type=int, help="Épocas sem novo melhor F1 de validação antes de parar (padrão: 20)")
     parser.add_argument("--device", help="auto, cpu, cuda ou cuda:N")
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--seed", type=int)
@@ -34,6 +34,8 @@ def main() -> None:
     parser.add_argument("--weights-dir", type=Path)
     parser.add_argument("--search-config", type=Path, help="Espaço de busca TOML para o Optuna")
     parser.add_argument("--search-trials", type=int, help="Total de tentativas concluídas por estudo Optuna")
+    parser.add_argument("--resume-search", action="store_true",
+                        help="Retoma automaticamente a busca mais recente do dataset em output-dir e segue até treino e teste")
     parser.add_argument("--reuse-search", type=Path, help="Importa a configuração vencedora de uma busca salva")
     parser.add_argument("--force-restart", action="store_true", default=None, help="Cria nova execução, sem reutilizar treinos nem apagar resultados anteriores")
     parser.add_argument("--subset", choices=("asl_2nd", "all", "arcanjo"))
@@ -44,6 +46,12 @@ def main() -> None:
     parser.add_argument("--augmentation", action=argparse.BooleanOptionalAction, default=None,
                         help="Compatibilidade: este experimento aceita somente --no-augmentation")
     args = parser.parse_args()
+
+    if args.resume_search:
+        if args.train is None:
+            parser.error("--resume-search deve ser usado com --train.")
+        if args.force_restart or args.reuse_search is not None:
+            parser.error("--resume-search não pode ser combinado com --force-restart ou --reuse-search.")
 
     if args.list_models:
         from models.model_registry import ModelRegistry
@@ -74,14 +82,29 @@ def main() -> None:
         if args.dataset is not None:
             parser.error("Informe o dataset no comando ou em --dataset, uma única vez.")
         overrides["dataset"] = getattr(args, action)
+    resume_overrides = dict(overrides)
     processor_options = dict(config.processor_options)
+    explicit_processor_options = {}
     for name in ("subset", "frame_count", "anchor", "imputation", "augmentation"):
         if getattr(args, name) is not None:
             processor_options[name] = getattr(args, name)
+            explicit_processor_options[name] = getattr(args, name)
     overrides["processor_options"] = processor_options
     config = config.with_overrides(overrides)
     if len(config.dataset.parts) == 1 and not config.dataset.exists():
         config = config.with_overrides({"dataset": Path("data") / config.dataset})
+
+    if args.resume_search:
+        from training.search_resume import resume_latest_search
+
+        if "dataset" in resume_overrides:
+            resume_overrides["dataset"] = config.dataset
+        resume_overrides["processor_options"] = explicit_processor_options
+        try:
+            resume_latest_search(config, resume_overrides)
+        except ValueError as error:
+            parser.error(str(error))
+        return
 
     if action == "build_manifest":
         from dataset.manifest_builder import ManifestBuilder

@@ -35,7 +35,7 @@ O experimento usa processamento determinístico, **sem data augmentation**, em t
 
 | Opções | Uso |
 |---|---|
-| `--epochs`, `--patience` | Limite de épocas e early stopping nas validações internas |
+| `--epochs`, `--patience` | Teto e espera nas validações internas; padrões: 1.000 e 20, fora da busca Optuna |
 | `--final-epochs` | Duração final já selecionada, para uma configuração sem busca |
 | `--batch-size`, `--learning-rate`, `--weight-decay` | Treino; weight decay desacoplado do AdamW |
 | `--l1-lambda`, `--l2-lambda`, `--label-smoothing`, `--gradient-clip` | Penalidades explícitas, suavização de rótulos e clipping |
@@ -47,6 +47,7 @@ O experimento usa processamento determinístico, **sem data augmentation**, em t
 | `--device auto\|cpu\|cuda:N`, `--num-workers`, `--seed` | Execução |
 | `--output-dir`, `--weights-dir` | Resultados e pesos compartilhados |
 | `--search-config`, `--search-trials` | Espaço de busca Optuna e total de tentativas concluídas |
+| `--resume-search` | Localizar e retomar a busca mais recente, inclusive em `fresh_<id>`, até treino final e teste |
 | `--reuse-search`, `--force-restart` | Importar uma busca salva ou iniciar treinos em um diretório novo |
 
 Sem escolher o teste, usa o sinalizador marcado no manifesto ou o primeiro ID disponível. Cada outro sinalizador é usado para validação. `--validation-signer-id` restringe a uma rodada. Para LOPO completo:
@@ -95,11 +96,13 @@ A ancoragem exige **novo treinamento**. Os CSVs da extração continuam aproveit
 libras-translator --train --config configs/resnet18.toml --search-trials 10
 ```
 
-O Optuna usa TPE e maximiza a média do F1 macro nas validações internas. O espaço padrão busca taxa de aprendizado, batch, limite de épocas, weight decay do AdamW, L1, L2, label smoothing, largura e quantidade de camadas do classificador, dropout e quais camadas da ResNet podem aprender. `epochs` limita cada treino interno; a duração final deriva das melhores épocas da configuração vencedora.
+O Optuna usa TPE e maximiza a média do F1 macro nas validações internas. O espaço padrão busca taxa de aprendizado, batch, weight decay do AdamW, L1, L2, label smoothing, clipping de gradiente, largura e quantidade de camadas do classificador, dropout e quais camadas da ResNet podem aprender. `epochs` e `patience` ficam fora do espaço de busca e são iguais para todas as tentativas do estudo.
 
-O espaço para cluster usa 200 tentativas, com 30 iniciais aleatórias. Explora cabeças de 1–4 camadas e 32–1.024 unidades, dropout de 0–0,7 e cinco opções de congelamento, incluindo liberar toda a ResNet. Os limites de épocas vão de 30 a 300 e a patience de 5 a 20. O comando acima, limitado a 10 tentativas, serve para uma verificação curta e fica inteiramente na fase aleatória. A busca continua sequencial, mesmo no cluster.
+Cada treino interno tem teto padrão de **1.000 épocas** e espera **20 épocas consecutivas sem um novo melhor F1 macro de validação**. Um F1 estritamente maior salva `best.pt` e zera o contador. Quedas, empates e recuperações que ainda não superam o melhor F1 contam como épocas sem melhora. Por exemplo, se o melhor resultado ocorreu na época 40 e não for superado, o treino termina após a época 60. As 1.000 épocas são um limite, não uma duração obrigatória; `--epochs` e `--patience` podem alterar esses limites fora da busca.
 
-O console mostra o protocolo por sinalizador, o orçamento e espaço da busca, a configuração completa antes de cada tentativa (inclusive ao retomar) e a configuração vencedora. O limite interno de épocas impresso na busca é convertido na duração final pela regra da mediana.
+O espaço para cluster usa 200 tentativas, com 30 iniciais aleatórias. Explora cabeças de 1–4 camadas e 32–1.024 unidades, dropout de 0–0,7 e três opções de camadas treináveis: `fc`, `layer4,fc` e `layer3,layer4,fc`. O comando acima, limitado a 10 tentativas, serve para uma verificação curta e fica inteiramente na fase aleatória. A busca continua sequencial, mesmo no cluster.
+
+O console mostra o protocolo por sinalizador, o orçamento e espaço da busca, a configuração completa antes de cada tentativa (inclusive ao retomar) e a configuração vencedora. Cada época informa a espera acumulada; ao terminar, o log distingue early stopping do teto de épocas. Antes do treino final, imprime as melhores épocas das validações e a mediana escolhida, sem acrescentar a espera do early stopping. O treino final continua sem validação: usa a mediana das melhores épocas das divisões vencedoras, não a época em que cada divisão parou. Para deixar essa duração ser estimada automaticamente, use o preset sem informar `--final-epochs` nem carregar uma configuração final já exportada.
 
 Repetir o mesmo comando reutiliza o estudo, as divisões concluídas, o treinamento final e o teste quando ainda correspondem ao código, aos dados e à configuração. Treinos interrompidos retomam a partir de `last.pt`; uma época incompleta é repetida. O orçamento representa o total de tentativas **concluídas**, não novas tentativas a cada execução. Para ampliar a busca para trezentas no total:
 
@@ -107,6 +110,15 @@ Repetir o mesmo comando reutiliza o estudo, as divisões concluídas, o treiname
 libras-translator --train --config configs/resnet18.toml \
   --search-trials 300
 ```
+
+Para retomar automaticamente a busca mais recente após uma interrupção:
+
+```bash
+libras-translator --train --resume-search \
+  --dataset data/minds_libras --output-dir runs
+```
+
+O comando escolhe o banco `optuna.sqlite3` modificado mais recentemente nas buscas desse dataset, incluindo as pastas `fresh_<id>`. Restaura a configuração salva, informa o melhor F1 já encontrado e continua as tentativas pendentes no mesmo diretório. Ao concluir a busca, segue para o treino final, teste e gráficos. `--search-trials 300` pode ampliar o total; os demais controles da busca devem continuar compatíveis com os originais. A retomada confere código, dados, divisões, espaço de busca e versão do Optuna antes de iniciar o treino. Não é combinada com `--force-restart` ou `--reuse-search`.
 
 Para executar uma nova busca e novos treinos sem apagar resultados anteriores:
 
@@ -123,7 +135,9 @@ libras-translator --train --config configs/resnet18.toml \
   --reuse-search runs/minds_libras/search_1cf0ec14bae0 --force-restart
 ```
 
-Essa busca legada seleciona nove épocas finais. Ela usou outro protocolo: agora a augmentation está desativada e o otimizador é AdamW, além das opções novas de regularização. Seu F1 antigo descreve as validações de origem e **não valida o protocolo atual**. A importação registra essa origem; recomendamos a nova busca padrão para selecionar parâmetros no experimento atual.
+Ao importar uma busca cujo teto de épocas ou patience difere da configuração atual, o pipeline reavalia a configuração vencedora nas validações internas com os limites atuais, sem iniciar outra busca Optuna. As novas melhores épocas definem a duração final. A origem e as diferenças ficam registradas em `protocol_changes`; o F1 histórico descreve o protocolo de origem e **não valida o protocolo atual**.
+
+Buscas legadas também podem ter diferenças de augmentation, otimizador, regularização e código. A importação registra essas diferenças. A reavaliação do vencedor verifica essa configuração no protocolo atual; uma nova busca é necessária para comparar outras configurações sob esse protocolo.
 
 Também é possível importar hiperparâmetros de uma busca anterior à ancoragem. Nesse caso, o treino final usa a referência da configuração atual, e o resultado registra a mudança de processamento; o F1 da busca de origem não valida o modelo ancorado.
 

@@ -140,6 +140,121 @@ class TrainerTests(unittest.TestCase):
         self.assertEqual([epoch["validation_f1_macro"] for epoch in history], [0.4, 0.6, 0.5, 0.6])
         last = torch.load(trainer.output_dir / "last.pt", weights_only=True)
         self.assertEqual(last["stale_epochs"], 2)
+        self.assertEqual(result["early_stopping"], {
+            "monitor": "validation_f1_macro", "patience": 2, "stale_epochs": 2,
+            "max_epochs": 10, "stop_reason": "patience_exhausted", "best_epoch": 2,
+        })
+
+    def test_twenty_epoch_patience_waits_and_resets_only_for_a_new_best_f1(self):
+        trainer = Trainer(self.root / "recovery", self.mapping, {
+            **self.config, "epochs": 1000, "patience": 20,
+        })
+        model = nn.Linear(3, 2)
+        validation = TinyDataset(4)
+        testing = TinyDataset(2)
+        # A melhora chega após 19 épocas ruins; o contador precisa recomeçar.
+        scores = iter([0.8] + [0.7] * 19 + [0.81] + [0.75] * 20)
+        epochs = []
+
+        def train_epoch(current_model, optimizer, dataset):
+            epochs.append(len(epochs) + 1)
+            with torch.no_grad():
+                current_model.weight.fill_(epochs[-1])
+            return {"loss": 0.4, "f1_macro": 1.0}
+
+        def evaluate(current_model, dataset):
+            if dataset is testing:
+                self.assertTrue(torch.all(current_model.weight == 21))
+                return {"loss": 0.5, "accuracy": 0.81, "f1_macro": 0.81}
+            self.assertIs(dataset, validation)
+            score = next(scores)
+            return {"loss": 0.5, "accuracy": score, "f1_macro": score}
+
+        with patch.object(trainer, "_train_epoch", side_effect=train_epoch):
+            with patch.object(trainer, "_evaluate", side_effect=evaluate):
+                result = trainer.train(model, TinyDataset(), validation)
+                trainer.test(model, testing)
+
+        self.assertEqual(result["best_epoch"], 21)
+        self.assertEqual(result["epochs_trained"], 41)
+        self.assertEqual(result["validation_f1_macro"], 0.81)
+        self.assertEqual(result["early_stopping"]["stale_epochs"], 20)
+        self.assertEqual(result["early_stopping"]["stop_reason"], "patience_exhausted")
+        self.assertEqual(len(epochs), 41)
+        saved = json.loads((trainer.output_dir / "validation.json").read_text())
+        self.assertEqual(saved["early_stopping"], result["early_stopping"])
+
+    def test_partial_recovery_does_not_reset_patience_without_beating_the_best_f1(self):
+        trainer = Trainer(self.root / "partial_recovery", self.mapping, {
+            **self.config, "epochs": 1000, "patience": 20,
+        })
+        scores = iter([0.8] + [0.4] * 10 + [0.7] * 10)
+
+        def evaluate(model, dataset):
+            score = next(scores)
+            return {"loss": 0.5, "accuracy": score, "f1_macro": score}
+
+        with patch.object(trainer, "_train_epoch", return_value={"loss": 0.4, "f1_macro": 1.0}):
+            with patch.object(trainer, "_evaluate", side_effect=evaluate):
+                result = trainer.train(nn.Linear(3, 2), TinyDataset(), TinyDataset(4))
+
+        self.assertEqual(result["best_epoch"], 1)
+        self.assertEqual(result["epochs_trained"], 21)
+        self.assertEqual(result["early_stopping"]["stale_epochs"], 20)
+
+    def test_resuming_keeps_the_patience_counter_and_the_best_checkpoint(self):
+        config = {**self.config, "epochs": 1000, "patience": 20}
+        interrupted = Trainer(self.root / "resume_patience", self.mapping, config)
+        epochs = []
+        interrupt = True
+
+        def train_epoch(model, optimizer, dataset):
+            if interrupt and len(epochs) == 7:
+                raise KeyboardInterrupt("Interrupção durante a espera do early stopping")
+            epochs.append(len(epochs) + 1)
+            with torch.no_grad():
+                model.weight.fill_(epochs[-1])
+            return {"loss": 0.4, "f1_macro": 1.0}
+
+        def evaluate(model, dataset):
+            score = 0.8 if len(epochs) == 1 else 0.7
+            return {"loss": 0.5, "accuracy": score, "f1_macro": score}
+
+        with patch.object(interrupted, "_train_epoch", side_effect=train_epoch):
+            with patch.object(interrupted, "_evaluate", side_effect=evaluate):
+                with self.assertRaises(KeyboardInterrupt):
+                    interrupted.train(nn.Linear(3, 2), TinyDataset(), TinyDataset(4))
+        last = torch.load(interrupted.output_dir / "last.pt", weights_only=True)
+        self.assertEqual(last["epoch"], 7)
+        self.assertEqual(last["stale_epochs"], 6)
+
+        interrupt = False
+        resumed = Trainer(interrupted.output_dir, self.mapping, config)
+        with patch.object(resumed, "_train_epoch", side_effect=train_epoch):
+            with patch.object(resumed, "_evaluate", side_effect=evaluate):
+                result = resumed.train(nn.Linear(3, 2), TinyDataset(), TinyDataset(4))
+        self.assertEqual(result["best_epoch"], 1)
+        self.assertEqual(result["epochs_trained"], 21)
+        self.assertEqual(result["early_stopping"]["stale_epochs"], 20)
+        self.assertEqual(len(epochs), 21)
+        best = torch.load(resumed.output_dir / "best.pt", weights_only=True)
+        self.assertTrue(torch.all(best["model_state_dict"]["weight"] == 1))
+
+    def test_validation_reports_when_the_maximum_epoch_budget_is_reached(self):
+        trainer = Trainer(self.root / "max_epochs", self.mapping, {**self.config, "patience": 20})
+        scores = iter((0.4, 0.5, 0.6))
+
+        def evaluate(model, dataset):
+            score = next(scores)
+            return {"loss": 0.5, "accuracy": score, "f1_macro": score}
+
+        with patch.object(trainer, "_train_epoch", return_value={"loss": 0.4, "f1_macro": 1.0}):
+            with patch.object(trainer, "_evaluate", side_effect=evaluate):
+                result = trainer.train(nn.Linear(3, 2), TinyDataset(), TinyDataset(4))
+        self.assertEqual(result["early_stopping"], {
+            "monitor": "validation_f1_macro", "patience": 20, "stale_epochs": 0,
+            "max_epochs": 3, "stop_reason": "max_epochs", "best_epoch": 3,
+        })
 
     def test_resuming_restores_model_optimizer_and_all_random_generators(self):
         self._seed(123)

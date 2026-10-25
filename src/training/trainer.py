@@ -22,7 +22,7 @@ class Trainer():
 
     # Público
     def train(self, model: nn.Module, train_dataset, validation_dataset) -> dict:
-        """Busca: escolhe a melhor época pelo F1 de validação e salva best.pt."""
+        """Para após patience épocas sem novo melhor F1, preservando best.pt."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
         validation_path = self.output_dir / "validation.json"
         if validation_path.exists() and (self.output_dir / "best.pt").exists():
@@ -58,12 +58,7 @@ class Trainer():
                 "validation_accuracy": validation["accuracy"],
                 "validation_f1_macro": validation["f1_macro"],
             })
-            print(
-                f"Época {epoch}/{self.config['epochs']} | "
-                f"treino F1={training['f1_macro']:.4f}, loss={training['loss']:.4f} | "
-                f"val F1={validation['f1_macro']:.4f}, loss={validation['loss']:.4f}", flush=True,
-            )
-
+            # Só um novo recorde reinicia a espera; empates e recuperações parciais contam.
             if validation["f1_macro"] > best_f1:
                 best_f1, stale_epochs = validation["f1_macro"], 0
                 self._save_torch("best.pt", {
@@ -74,6 +69,15 @@ class Trainer():
             else:
                 stale_epochs += 1
 
+            history[-1].update({"best_validation_f1_macro": best_f1, "stale_epochs": stale_epochs})
+            print(
+                f"Época {epoch}/{self.config['epochs']} | "
+                f"treino F1={training['f1_macro']:.4f}, loss={training['loss']:.4f} | "
+                f"val F1={validation['f1_macro']:.4f}, loss={validation['loss']:.4f} | "
+                f"melhor val F1={best_f1:.4f} | sem melhora={stale_epochs}/{self.config['patience']}",
+                flush=True,
+            )
+
             self._save_torch("last.pt", {
                 "mode": "validation", "config": self.config,
                 "model_state_dict": model.state_dict(), "optimizer_state_dict": optimizer.state_dict(),
@@ -83,9 +87,21 @@ class Trainer():
             self.write_json("history.json", history)
 
         best = torch.load(self.output_dir / "best.pt", map_location="cpu", weights_only=True)
+        stop_reason = "patience_exhausted" if stale_epochs >= self.config["patience"] else "max_epochs"
+        reason = (
+            f"Early stopping: {stale_epochs} épocas consecutivas sem superar o melhor F1 de validação"
+            if stop_reason == "patience_exhausted"
+            else f"Limite de {self.config['epochs']} épocas atingido"
+        )
+        print(f"{reason}. Melhor época: {best['epoch']} | F1={best['validation_f1_macro']:.4f}.", flush=True)
         result = {
             "best_epoch": best["epoch"], "validation_accuracy": best["validation_accuracy"],
             "validation_f1_macro": best["validation_f1_macro"], "epochs_trained": len(history),
+            "early_stopping": {
+                "monitor": "validation_f1_macro", "patience": self.config["patience"],
+                "stale_epochs": stale_epochs, "max_epochs": self.config["epochs"],
+                "stop_reason": stop_reason, "best_epoch": best["epoch"],
+            },
         }
         self.write_json("history.json", history)
         self.write_json("validation.json", result)
