@@ -1,0 +1,24 @@
+# O modelo final da execução concluída mais recente em runs/.
+checkpoint = "auto"
+source = 0
+width = 960
+height = 540
+# Tamanho inicial da janela de visualização, independente da captura.
+window_width = 1280
+window_height = 720
+fps = 30.0
+device = "auto"
+
+# Uma janela completa é necessária antes da primeira classificação.
+window_seconds = 3.0
+sample_fps = 30.0
+prediction_interval = 0.3
+confidence_threshold = 0.7
+stability_count = 3
+max_frame_gap = 0.35
+person_timeout = 0.6
+max_prediction_age = 1.2
+cpu_threads = 2
+
+# Espelha somente a visualização, nunca os dados enviados ao modelo.
+mirror = true

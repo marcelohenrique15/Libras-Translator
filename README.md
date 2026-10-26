@@ -12,6 +12,35 @@ source .venv/bin/activate
 python -m pip install -e .
 ```
 
+## Aplicação com câmera
+
+Na raiz do projeto, com o ambiente ativado:
+
+```bash
+libras-camera --config configs/application.toml
+```
+
+A aplicação usa o modelo final da execução concluída mais recente em `runs/`,
+desenha três candidatos com confiança no canto superior direito e uma legenda
+com a palavra principal acompanhando a pessoa. A janela abre em 1280×720;
+`window_width` e `window_height` permitem ajustar esse tamanho na configuração.
+O espelhamento é somente visual. **ESC** encerra, **espaço** pausa/retoma a análise
+e **R** limpa o contexto. Para escolher os pesos explicitamente:
+
+```bash
+libras-camera --checkpoint caminho/final.pt --camera 0 --device auto
+```
+
+Sem reinstalar o projeto após adicionar o novo comando, use:
+
+```bash
+PYTHONPATH=src python -m application --config configs/application.toml
+```
+
+Veja o [guia da aplicação](docs/APPLICATION.md) para arquitetura, configuração,
+reprodução de vídeo, concorrência e limitações. O modelo reconhece sinais isolados;
+a legenda ao vivo ainda não realiza tradução de frases ou segmentação linguística.
+
 ## Treino
 
 ```bash
@@ -36,7 +65,7 @@ O experimento usa processamento determinístico, **sem data augmentation**, em t
 | Opções | Uso |
 |---|---|
 | `--epochs`, `--patience` | Teto e espera nas validações internas; padrões: 1.000 e 20, fora da busca Optuna |
-| `--final-epochs` | Duração final já selecionada, para uma configuração sem busca |
+| `--final-epochs` | Teto opcional do treino final, que mantém validação e early stopping |
 | `--batch-size`, `--learning-rate`, `--weight-decay` | Treino; weight decay desacoplado do AdamW |
 | `--l1-lambda`, `--l2-lambda`, `--label-smoothing`, `--gradient-clip` | Penalidades explícitas, suavização de rótulos e clipping |
 | `--test-signer-id ID\|all`, `--validation-signer-id ID` | Divisão por sinalizador |
@@ -56,7 +85,7 @@ Sem escolher o teste, usa o sinalizador marcado no manifesto ou o primeiro ID di
 libras-translator --train --config configs/resnet18.toml --test-signer-id all
 ```
 
-Cada teste externo tem um estudo próprio. Com 12 sinalizadores e 200 tentativas por estudo, o LOPO completo custa **26.400 treinamentos internos + 12 finais = 26.412 treinamentos**. `--validation-signer-id` reduz a seleção a uma única pessoa de validação; o modelo final ainda treina em todas as pessoas fora do teste.
+Cada teste externo tem um estudo próprio. Com 12 sinalizadores e 200 tentativas por estudo, o LOPO completo custa **26.400 treinamentos internos + 12 finais = 26.412 treinamentos**. `--validation-signer-id` reduz a seleção a uma única pessoa de validação; o modelo final preserva suas pessoas de validação e teste.
 
 ## Preparação por etapa
 
