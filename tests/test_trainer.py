@@ -140,6 +140,121 @@ class TrainerTests(unittest.TestCase):
         self.assertEqual([epoch["validation_f1_macro"] for epoch in history], [0.4, 0.6, 0.5, 0.6])
         last = torch.load(trainer.output_dir / "last.pt", weights_only=True)
         self.assertEqual(last["stale_epochs"], 2)
+        self.assertEqual(result["early_stopping"], {
+            "monitor": "validation_f1_macro", "patience": 2, "stale_epochs": 2,
+            "max_epochs": 10, "stop_reason": "patience_exhausted", "best_epoch": 2,
+        })
+
+    def test_twenty_epoch_patience_waits_and_resets_only_for_a_new_best_f1(self):
+        trainer = Trainer(self.root / "recovery", self.mapping, {
+            **self.config, "epochs": 1000, "patience": 20,
+        })
+        model = nn.Linear(3, 2)
+        validation = TinyDataset(4)
+        testing = TinyDataset(2)
+        # A melhora chega após 19 épocas ruins; o contador precisa recomeçar.
+        scores = iter([0.8] + [0.7] * 19 + [0.81] + [0.75] * 20)
+        epochs = []
+
+        def train_epoch(current_model, optimizer, dataset):
+            epochs.append(len(epochs) + 1)
+            with torch.no_grad():
+                current_model.weight.fill_(epochs[-1])
+            return {"loss": 0.4, "f1_macro": 1.0}
+
+        def evaluate(current_model, dataset):
+            if dataset is testing:
+                self.assertTrue(torch.all(current_model.weight == 21))
+                return {"loss": 0.5, "accuracy": 0.81, "f1_macro": 0.81}
+            self.assertIs(dataset, validation)
+            score = next(scores)
+            return {"loss": 0.5, "accuracy": score, "f1_macro": score}
+
+        with patch.object(trainer, "_train_epoch", side_effect=train_epoch):
+            with patch.object(trainer, "_evaluate", side_effect=evaluate):
+                result = trainer.train(model, TinyDataset(), validation)
+                trainer.test(model, testing)
+
+        self.assertEqual(result["best_epoch"], 21)
+        self.assertEqual(result["epochs_trained"], 41)
+        self.assertEqual(result["validation_f1_macro"], 0.81)
+        self.assertEqual(result["early_stopping"]["stale_epochs"], 20)
+        self.assertEqual(result["early_stopping"]["stop_reason"], "patience_exhausted")
+        self.assertEqual(len(epochs), 41)
+        saved = json.loads((trainer.output_dir / "validation.json").read_text())
+        self.assertEqual(saved["early_stopping"], result["early_stopping"])
+
+    def test_partial_recovery_does_not_reset_patience_without_beating_the_best_f1(self):
+        trainer = Trainer(self.root / "partial_recovery", self.mapping, {
+            **self.config, "epochs": 1000, "patience": 20,
+        })
+        scores = iter([0.8] + [0.4] * 10 + [0.7] * 10)
+
+        def evaluate(model, dataset):
+            score = next(scores)
+            return {"loss": 0.5, "accuracy": score, "f1_macro": score}
+
+        with patch.object(trainer, "_train_epoch", return_value={"loss": 0.4, "f1_macro": 1.0}):
+            with patch.object(trainer, "_evaluate", side_effect=evaluate):
+                result = trainer.train(nn.Linear(3, 2), TinyDataset(), TinyDataset(4))
+
+        self.assertEqual(result["best_epoch"], 1)
+        self.assertEqual(result["epochs_trained"], 21)
+        self.assertEqual(result["early_stopping"]["stale_epochs"], 20)
+
+    def test_resuming_keeps_the_patience_counter_and_the_best_checkpoint(self):
+        config = {**self.config, "epochs": 1000, "patience": 20}
+        interrupted = Trainer(self.root / "resume_patience", self.mapping, config)
+        epochs = []
+        interrupt = True
+
+        def train_epoch(model, optimizer, dataset):
+            if interrupt and len(epochs) == 7:
+                raise KeyboardInterrupt("Interrupção durante a espera do early stopping")
+            epochs.append(len(epochs) + 1)
+            with torch.no_grad():
+                model.weight.fill_(epochs[-1])
+            return {"loss": 0.4, "f1_macro": 1.0}
+
+        def evaluate(model, dataset):
+            score = 0.8 if len(epochs) == 1 else 0.7
+            return {"loss": 0.5, "accuracy": score, "f1_macro": score}
+
+        with patch.object(interrupted, "_train_epoch", side_effect=train_epoch):
+            with patch.object(interrupted, "_evaluate", side_effect=evaluate):
+                with self.assertRaises(KeyboardInterrupt):
+                    interrupted.train(nn.Linear(3, 2), TinyDataset(), TinyDataset(4))
+        last = torch.load(interrupted.output_dir / "last.pt", weights_only=True)
+        self.assertEqual(last["epoch"], 7)
+        self.assertEqual(last["stale_epochs"], 6)
+
+        interrupt = False
+        resumed = Trainer(interrupted.output_dir, self.mapping, config)
+        with patch.object(resumed, "_train_epoch", side_effect=train_epoch):
+            with patch.object(resumed, "_evaluate", side_effect=evaluate):
+                result = resumed.train(nn.Linear(3, 2), TinyDataset(), TinyDataset(4))
+        self.assertEqual(result["best_epoch"], 1)
+        self.assertEqual(result["epochs_trained"], 21)
+        self.assertEqual(result["early_stopping"]["stale_epochs"], 20)
+        self.assertEqual(len(epochs), 21)
+        best = torch.load(resumed.output_dir / "best.pt", weights_only=True)
+        self.assertTrue(torch.all(best["model_state_dict"]["weight"] == 1))
+
+    def test_validation_reports_when_the_maximum_epoch_budget_is_reached(self):
+        trainer = Trainer(self.root / "max_epochs", self.mapping, {**self.config, "patience": 20})
+        scores = iter((0.4, 0.5, 0.6))
+
+        def evaluate(model, dataset):
+            score = next(scores)
+            return {"loss": 0.5, "accuracy": score, "f1_macro": score}
+
+        with patch.object(trainer, "_train_epoch", return_value={"loss": 0.4, "f1_macro": 1.0}):
+            with patch.object(trainer, "_evaluate", side_effect=evaluate):
+                result = trainer.train(nn.Linear(3, 2), TinyDataset(), TinyDataset(4))
+        self.assertEqual(result["early_stopping"], {
+            "monitor": "validation_f1_macro", "patience": 20, "stale_epochs": 0,
+            "max_epochs": 3, "stop_reason": "max_epochs", "best_epoch": 3,
+        })
 
     def test_resuming_restores_model_optimizer_and_all_random_generators(self):
         self._seed(123)
@@ -189,39 +304,60 @@ class TrainerTests(unittest.TestCase):
         self.assertEqual(expected_next_random[:2], actual_next_random[:2])
         self.assertTrue(torch.equal(expected_next_random[2], actual_next_random[2]))
 
-    def test_final_fit_runs_fixed_epochs_without_validation_and_test_uses_final_weights(self):
-        config = {**self.config, "patience": 1}
+    def test_final_fit_restores_best_validation_weights_before_testing(self):
+        config = {**self.config, "epochs": 10, "patience": 2}
         trainer = Trainer(self.root / "final", self.mapping, config)
         model = nn.Linear(3, 2)
-        initial = model.weight.detach().clone()
-        with patch.object(trainer, "_evaluate", side_effect=AssertionError("refit não valida")):
-            result = trainer.fit(model, TinyDataset())
-        self.assertEqual(result["epochs_trained"], 3)
+        training, validation = TinyDataset(), TinyDataset(4)
+        scores = iter((0.4, 0.8, 0.6, 0.7))
+        epochs = []
+
+        def train_epoch(current, optimizer, dataset):
+            self.assertIs(dataset, training)
+            epochs.append(len(epochs) + 1)
+            with torch.no_grad():
+                current.weight.fill_(epochs[-1])
+            return {"loss": 1 / epochs[-1], "accuracy": 1.0, "f1_macro": 1.0}
+
+        def evaluate(current, dataset):
+            self.assertIs(dataset, validation)
+            score = next(scores)
+            return {"loss": 1 / epochs[-1], "accuracy": score, "f1_macro": score}
+
+        with patch.object(trainer, "_train_epoch", side_effect=train_epoch):
+            with patch.object(trainer, "_evaluate", side_effect=evaluate):
+                result = trainer.fit(model, training, validation)
+        self.assertEqual(result["epochs_trained"], 4)
+        self.assertEqual(result["best_epoch"], 2)
+        self.assertEqual(result["final_epoch"], 2)
         self.assertEqual(result["sample_count"], 6)
-        self.assertFalse(torch.equal(initial, model.weight))
-        self.assertFalse((trainer.output_dir / "best.pt").exists())
-        self.assertFalse((trainer.output_dir / "validation.json").exists())
+        self.assertEqual(result["validation_sample_count"], 4)
+        self.assertEqual(result["validation_f1_macro"], 0.8)
+        self.assertEqual(result["train_loss"], 0.5)
         final = torch.load(trainer.output_dir / "final.pt", weights_only=True)
-        self.assertEqual(final["epoch"], 3)
+        last = torch.load(trainer.output_dir / "last.pt", weights_only=True)
+        self.assertEqual(final["epoch"], 2)
+        self.assertTrue(torch.all(final["model_state_dict"]["weight"] == 2))
+        self.assertTrue(torch.all(last["model_state_dict"]["weight"] == 4))
+        self.assertTrue(torch.all(model.weight == 2))
         history = json.loads((trainer.output_dir / "history.json").read_text())
-        self.assertEqual([row["epoch"] for row in history], [1, 2, 3])
-        self.assertTrue(all("validation_loss" not in row for row in history))
+        self.assertEqual([row["epoch"] for row in history], [1, 2, 3, 4])
+        self.assertTrue(all("validation_loss" in row for row in history))
 
         with torch.no_grad():
             model.weight.fill_(99)
-        trainer._save_torch("best.pt", {"model_state_dict": model.state_dict()})
         tested = trainer.test(model, TinyDataset(4))
         self.assertTrue(torch.equal(model.weight, final["model_state_dict"]["weight"]))
         self.assertEqual(len(tested["metrics"]["probabilities"]), 4)
         for probabilities in tested["metrics"]["probabilities"]:
             self.assertAlmostEqual(sum(probabilities), 1.0, places=6)
         with patch.object(trainer, "_train_epoch", side_effect=AssertionError("refit concluído repetido")):
-            self.assertEqual(trainer.fit(model, TinyDataset()), result)
+            self.assertEqual(trainer.fit(model, training, validation), result)
 
     def test_final_fit_resumes_identically_after_an_interruption(self):
         self._seed(12)
         continuous = Trainer(self.root / "continuous_fit", self.mapping, self.config)
-        expected = continuous.fit(self._mlp(), TinyDataset(consume_random=True))
+        expected = continuous.fit(self._mlp(), TinyDataset(consume_random=True), TinyDataset(4))
         expected_checkpoint = torch.load(continuous.output_dir / "last.pt", weights_only=True)
 
         self._seed(12)
@@ -238,10 +374,10 @@ class TrainerTests(unittest.TestCase):
 
         with patch.object(interrupted, "_train_epoch", side_effect=stop):
             with self.assertRaisesRegex(RuntimeError, "Interrompido"):
-                interrupted.fit(self._mlp(), TinyDataset(consume_random=True))
+                interrupted.fit(self._mlp(), TinyDataset(consume_random=True), TinyDataset(4))
         self.assertFalse((interrupted.output_dir / "final.pt").exists())
         self._seed(999)
-        actual = interrupted.fit(self._mlp(), TinyDataset(consume_random=True))
+        actual = interrupted.fit(self._mlp(), TinyDataset(consume_random=True), TinyDataset(4))
         actual_checkpoint = torch.load(interrupted.output_dir / "last.pt", weights_only=True)
         self.assertEqual(expected, actual)
         self.assertEqual(expected_checkpoint["history"], actual_checkpoint["history"])
@@ -252,12 +388,12 @@ class TrainerTests(unittest.TestCase):
         trainer = Trainer(self.root / "last_epoch_crash", self.mapping, {**self.config, "epochs": 1})
         with patch.object(trainer, "write_json", side_effect=KeyboardInterrupt("Antes de salvar history.json")):
             with self.assertRaises(KeyboardInterrupt):
-                trainer.fit(self._mlp(), TinyDataset())
+                trainer.fit(self._mlp(), TinyDataset(), TinyDataset(4))
         checkpoint = torch.load(trainer.output_dir / "last.pt", weights_only=True)
         self.assertEqual(checkpoint["epoch"], 1)
         self.assertFalse((trainer.output_dir / "history.json").exists())
         with patch.object(trainer, "_train_epoch", side_effect=AssertionError("última época repetida")):
-            result = trainer.fit(self._mlp(), TinyDataset())
+            result = trainer.fit(self._mlp(), TinyDataset(), TinyDataset(4))
         history = json.loads((trainer.output_dir / "history.json").read_text())
         self.assertEqual(history, checkpoint["history"])
         self.assertEqual(result["epochs_trained"], 1)

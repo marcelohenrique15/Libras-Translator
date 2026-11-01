@@ -10,7 +10,7 @@ from training.config import TrainingConfig
 
 class HyperparameterSearch:
     PARAMETERS = {
-        "learning_rate", "weight_decay", "batch_size", "epochs", "patience",
+        "learning_rate", "weight_decay", "batch_size",
         "l1_lambda", "l2_lambda", "label_smoothing", "gradient_clip",
     }
 
@@ -46,6 +46,7 @@ class HyperparameterSearch:
         print("Configuração da busca:\n" + json.dumps({
             "n_trials": target, "completed_trials": completed,
             "sampler": "TPE", "n_startup_trials": self.n_startup_trials,
+            "fixed_training_budget": {"max_epochs": base_config.epochs, "patience": base_config.patience},
             "parameters": self.parameters,
         }, indent=2, ensure_ascii=False), flush=True)
         while completed < target:
@@ -79,6 +80,8 @@ class HyperparameterSearch:
                 model_options[name.split(".", maxsplit=1)[1]] = value
             elif name.startswith("processor_options."):
                 processor_options[name.split(".", maxsplit=1)[1]] = value
+            elif name in {"epochs", "patience"}:
+                raise ValueError(f"{name} é fixo no experimento; defina-o na configuração, fora de [parameters].")
             else:
                 overrides[name] = value
         overrides["model_options"] = model_options

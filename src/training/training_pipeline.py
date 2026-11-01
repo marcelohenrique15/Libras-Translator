@@ -42,12 +42,15 @@ class TrainingPipeline():
         self.uses_landmarks = issubclass(processor_class, LandmarkProcessor)
         if self.uses_landmarks:
             processor_options.setdefault("augmentation", False)
+            processor_options.setdefault("anchor", "shoulders")
             representation = ModelRegistry.input_format(config.model)
             processor_options.setdefault("representation", representation)
             if processor_options["representation"] != representation:
                 raise ValueError(f"O modelo {config.model} recebe {representation}; ajuste processor_options.representation.")
         self.processor = ProcessorRegistry.create(config.processor, config.dataset, processor_options)
         self.processor_options = processor_options
+        # Salva as opções efetivas também nos trials e nas configurações finais.
+        self.config = config.with_overrides({"processor_options": processor_options})
 
     # Público
     def prepare(self, stage: str = "encode") -> list[dict[str, str]]:
@@ -78,20 +81,18 @@ class TrainingPipeline():
         writer = self._writer(run_dir, rows)
         results = []
         for test_signer in self._test_signers(rows):
+            validation_signer = self._final_validation_signer(rows, test_signer)
             print(f"4. Seleção de configuração | teste reservado: {test_signer}", flush=True)
             if self.config.reuse_search is not None:
                 selection = self._import_selection(rows, test_signer)
             elif search is not None:
                 selection = self._search(rows, test_signer, search, run_dir)
-            elif self.config.final_epochs is not None:
-                selection = ModelSelection(self.config, [], None, "provided_config")
             else:
-                folds = self._train_folds(rows, test_signer)
-                selection = ModelSelection(
-                    self.config, folds, self._validation_score(folds), "fixed_config_validation",
-                    validation_run_dir=self._run_dir(rows),
-                )
-            writer.write_json(f"best_config_test{test_signer}.json", selection.final_config(test_signer).to_dict())
+                selection = ModelSelection(self.config, [], None, "provided_config")
+            final_config = selection.final_config(test_signer).with_overrides({
+                "final_validation_signer_id": validation_signer,
+            })
+            writer.write_json(f"best_config_test{test_signer}.json", final_config.to_dict())
             results.append(self._fit_and_test(rows, test_signer, selection, run_dir))
 
         path = run_dir / "summary.json"
@@ -131,6 +132,15 @@ class TrainingPipeline():
             return [self._signer_id(self.config.validation_signer_id, signers)]
         return signers
 
+    def _final_validation_signer(self, rows, test_signer: str) -> str:
+        """Escolhe a pessoa antes do treino, sem consultar métricas ou dados do teste."""
+        signers = sorted({row["signer_id"] for row in rows} - {test_signer})
+        requested = self.config.final_validation_signer_id or self.config.validation_signer_id
+        if requested is not None:
+            return self._signer_id(requested, signers)
+        # Maior cobertura de classes; IDs ordenados tornam o desempate determinístico.
+        return max(signers, key=lambda signer: len({row["class_id"] for row in rows if row["signer_id"] == signer}))
+
     def _signer_id(self, value: str, signers: list[str]) -> str:
         if value in signers:
             return value
@@ -154,6 +164,7 @@ class TrainingPipeline():
         for name in (
             "dataset", "output_dir", "weights_dir", "test_signer_id", "validation_signer_id",
             "search_config", "search_trials", "reuse_search", "force_restart", "final_epochs", "num_workers",
+            "final_validation_signer_id",
         ):
             settings.pop(name)
         return {
@@ -248,7 +259,7 @@ class TrainingPipeline():
             signer: self._validation_signers(rows, signer)
             for signer in self._test_signers(rows)
         }
-        # O orçamento fica fora da assinatura para ampliar o mesmo estudo depois.
+        # Só o total de tentativas fica fora da assinatura; epochs e patience identificam o estudo.
         search_signature = {
             "base_run": self._run_id(rows), "parameters": search.parameters,
             "dataset_signature": self._dataset_signature(rows), "protocol_version": 2,
@@ -300,7 +311,9 @@ class TrainingPipeline():
         writer.write_json(f"search_test{test_signer}.json", report)
         trial_path = search_dir / f"trial_test{test_signer}_{winner.number}.json"
         trial = json.loads(trial_path.read_text(encoding="utf-8"))
-        candidate = search.configuration(self.config, winner.params)
+        candidate = search.configuration(self.config, winner.params).with_overrides({
+            "final_epochs": self.config.final_epochs,
+        })
         print(f"Vencedor: tentativa {winner.number + 1} | F1 validação={winner.value:.4f}", flush=True)
         return ModelSelection(
             candidate, trial["folds"], winner.value, str(trial_path.resolve()),
@@ -336,7 +349,10 @@ class TrainingPipeline():
             if argument.default is not inspect.Parameter.empty
         }
         tuned_processor_options = set(metadata.get("parameters", {}).get("processor_options", {}))
-        fixed_options = (old_processor.keys() | self.processor_options.keys()) - {"augmentation"} - tuned_processor_options
+        allowed_changes = {"augmentation"}
+        if self.uses_landmarks:
+            allowed_changes.add("anchor")
+        fixed_options = (old_processor.keys() | self.processor_options.keys()) - allowed_changes - tuned_processor_options
         for name in fixed_options:
             old_value = old_processor.get(name, processor_defaults.get(name))
             current_value = self.processor_options.get(name, processor_defaults.get(name))
@@ -365,7 +381,7 @@ class TrainingPipeline():
         processor_options.update({name: old_processor[name] for name in tuned_processor_options if name in old_processor})
         overrides["processor_options"] = processor_options
         overrides.update({"search_config": None, "search_trials": None, "reuse_search": None,
-                          "force_restart": False, "final_epochs": None})
+                          "force_restart": False, "final_epochs": self.config.final_epochs})
         candidate = self.config.with_overrides(overrides)
         changes = {}
         if metadata.get("code_signature") != self._code_signature():
@@ -377,32 +393,71 @@ class TrainingPipeline():
             changes["optimizer"] = {"source": "adam", "current": "adamw"}
         if old_processor.get("augmentation", False):
             changes["augmentation"] = {"source": True, "current": False}
+        if self.uses_landmarks:
+            # Buscas anteriores à ancoragem usavam coordenadas da câmera.
+            old_anchor = old_processor.get("anchor", "none")
+            current_anchor = candidate.processor_options["anchor"]
+            if old_anchor != current_anchor:
+                changes["anchor"] = {"source": old_anchor, "current": current_anchor}
         # Campos adicionados após a busca antiga usam os valores atuais, explicitamente registrados.
         for name in ("l1_lambda", "l2_lambda", "label_smoothing", "gradient_clip"):
             old_value = winning_config.get(name, 0.0 if name != "gradient_clip" else None)
+            if old_value != getattr(candidate, name):
+                changes[name] = {"source": old_value, "current": getattr(candidate, name)}
+        # O orçamento atual não é um hiperparâmetro importado de buscas antigas.
+        for name, old_default in (("epochs", 30), ("patience", 5)):
+            old_value = winning_config.get(name, base.get(name, old_default))
             if old_value != getattr(candidate, name):
                 changes[name] = {"source": old_value, "current": getattr(candidate, name)}
         if changes:
             print("Importando hiperparâmetros de outro protocolo; o F1 da origem não estima o treino atual.", flush=True)
         print(f"Reutilizando vencedor da busca: {trial_path}", flush=True)
         source_runs = source.parent
+        validation_run_dir = source_runs / trial["run_id"]
+        score = report["best_validation_f1_macro"]
+        score_scope = "source_validation"
+        if "epochs" in changes or "patience" in changes:
+            # Reaproveita os parâmetros e reavalia a seleção com os controles atuais.
+            print(
+                f"Reavaliando o vencedor nas validações: teto={candidate.epochs}, patience={candidate.patience}. "
+                "Sem nova busca Optuna.", flush=True,
+            )
+            pipeline = self._candidate_pipeline(candidate, rows)
+            folds = pipeline._train_folds(rows, test_signer)
+            score = self._validation_score(folds)
+            score_scope = "current_validation"
+            validation_run_dir = pipeline._run_dir(rows)
         return ModelSelection(
-            candidate, folds, report["best_validation_f1_macro"], str(trial_path),
-            validation_run_dir=source_runs / trial["run_id"], search_report=report, protocol_changes=changes,
+            candidate, folds, score, str(trial_path),
+            validation_run_dir=validation_run_dir, search_report=report,
+            protocol_changes=changes, score_scope=score_scope,
         )
 
     def _fit_and_test(self, rows, test_signer: str, selection: ModelSelection, run_dir: Path) -> dict:
-        config = selection.final_config(test_signer)
+        epoch_selection = selection.epoch_selection()
+        validation_signer = self._final_validation_signer(rows, test_signer)
+        config = selection.final_config(test_signer).with_overrides({
+            "final_validation_signer_id": validation_signer,
+        })
         pipeline = self._candidate_pipeline(config, rows)
-        final_dir = run_dir / "final" / f"test_{test_signer}" / pipeline._run_id(rows)
+        final_dir = run_dir / "final" / f"test_{test_signer}" / f"val_{validation_signer}" / pipeline._run_id(rows)
         trainer = pipeline._writer(final_dir, rows)
         mapping = self._class_mapping(rows)
-        train_rows = [row for row in rows if row["signer_id"] != test_signer]
+        train_rows = [row for row in rows if row["signer_id"] not in {test_signer, validation_signer}]
+        validation_rows = [row for row in rows if row["signer_id"] == validation_signer]
         test_rows = [row for row in rows if row["signer_id"] == test_signer]
-        trainer.config.update({"test_signer": test_signer, "train_signers": sorted({row['signer_id'] for row in train_rows})})
+        trainer.config.update({
+            "test_signer": test_signer, "validation_signer": validation_signer,
+            "train_signers": sorted({row['signer_id'] for row in train_rows}),
+        })
         trainer.write_json("config.json", config.to_dict())
 
-        print(f"5. Treino final | {len(train_rows)} vídeos | {config.epochs} épocas", flush=True)
+        print(
+            f"5. Treino final | treino: {len(train_rows)} vídeos | "
+            f"validação: {validation_signer} ({len(validation_rows)} vídeos) | "
+            f"teto: {config.epochs} épocas | patience: {config.patience} | melhor F1 de validação",
+            flush=True,
+        )
         training_path = final_dir / "training.json"
         if training_path.exists() and (final_dir / "final.pt").exists():
             training = json.loads(training_path.read_text(encoding="utf-8"))
@@ -412,7 +467,15 @@ class TrainingPipeline():
             if not (final_dir / "last.pt").exists():
                 print("Inicializando um novo modelo com os pesos definidos na configuração.", flush=True)
             model = pipeline._create_model(rows, load_checkpoint=(final_dir / "last.pt").exists())
-            training = trainer.fit(model, SignDataset(train_rows, pipeline.processor, mapping, training=True))
+            training = trainer.fit(
+                model, SignDataset(train_rows, pipeline.processor, mapping, training=True),
+                SignDataset(validation_rows, pipeline.processor, mapping),
+            )
+
+        epoch_selection.update({
+            "validation_signer": validation_signer, "best_epoch": training["best_epoch"],
+            "final_epochs": training["best_epoch"], "epochs_trained": training["epochs_trained"],
+        })
 
         print(f"6. Teste reservado | sinalizador {test_signer} | {len(test_rows)} vídeos", flush=True)
         test_path = final_dir / "test.json"
@@ -423,11 +486,21 @@ class TrainingPipeline():
             test = trainer.test(pipeline._create_model(rows, load_checkpoint=True), SignDataset(test_rows, pipeline.processor, mapping))
 
         result = {
-            "test_signer": test_signer, "config": config.to_dict(), "epoch_selection": selection.epoch_selection(),
+            "test_signer": test_signer, "config": config.to_dict(), "epoch_selection": epoch_selection,
             "selection": {"source": selection.source, "inner_folds": selection.folds,
-                          "score_scope": "source_validation", "protocol_changes": selection.protocol_changes,
-                          "score_valid_for_current_protocol": selection.score is not None and not bool(selection.protocol_changes)},
+                          "score_scope": selection.score_scope, "protocol_changes": selection.protocol_changes,
+                          "score_valid_for_current_protocol": selection.score is not None and (
+                              selection.score_scope == "current_validation" or not selection.protocol_changes
+                          )},
             "validation_f1_macro": selection.score, "training": training,
+            "final_validation_signer": validation_signer,
+            "final_validation_f1_macro": training["validation_f1_macro"],
+            "split": {
+                "train_signers": trainer.config["train_signers"],
+                "train_samples": [row["sample_id"] for row in train_rows],
+                "validation_signer": validation_signer,
+                "validation_samples": [row["sample_id"] for row in validation_rows],
+            },
             "test": test["metrics"], "test_samples": test["sample_ids"], "run_dir": str(final_dir.resolve()),
         }
         trainer.write_json("result.json", result)

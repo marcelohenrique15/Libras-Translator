@@ -22,7 +22,7 @@ class Trainer():
 
     # Público
     def train(self, model: nn.Module, train_dataset, validation_dataset) -> dict:
-        """Busca: escolhe a melhor época pelo F1 de validação e salva best.pt."""
+        """Para após patience épocas sem novo melhor F1, preservando best.pt."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
         validation_path = self.output_dir / "validation.json"
         if validation_path.exists() and (self.output_dir / "best.pt").exists():
@@ -58,12 +58,7 @@ class Trainer():
                 "validation_accuracy": validation["accuracy"],
                 "validation_f1_macro": validation["f1_macro"],
             })
-            print(
-                f"Época {epoch}/{self.config['epochs']} | "
-                f"treino F1={training['f1_macro']:.4f}, loss={training['loss']:.4f} | "
-                f"val F1={validation['f1_macro']:.4f}, loss={validation['loss']:.4f}", flush=True,
-            )
-
+            # Só um novo recorde reinicia a espera; empates e recuperações parciais contam.
             if validation["f1_macro"] > best_f1:
                 best_f1, stale_epochs = validation["f1_macro"], 0
                 self._save_torch("best.pt", {
@@ -74,6 +69,15 @@ class Trainer():
             else:
                 stale_epochs += 1
 
+            history[-1].update({"best_validation_f1_macro": best_f1, "stale_epochs": stale_epochs})
+            print(
+                f"Época {epoch}/{self.config['epochs']} | "
+                f"treino F1={training['f1_macro']:.4f}, loss={training['loss']:.4f} | "
+                f"val F1={validation['f1_macro']:.4f}, loss={validation['loss']:.4f} | "
+                f"melhor val F1={best_f1:.4f} | sem melhora={stale_epochs}/{self.config['patience']}",
+                flush=True,
+            )
+
             self._save_torch("last.pt", {
                 "mode": "validation", "config": self.config,
                 "model_state_dict": model.state_dict(), "optimizer_state_dict": optimizer.state_dict(),
@@ -83,68 +87,52 @@ class Trainer():
             self.write_json("history.json", history)
 
         best = torch.load(self.output_dir / "best.pt", map_location="cpu", weights_only=True)
+        stop_reason = "patience_exhausted" if stale_epochs >= self.config["patience"] else "max_epochs"
+        reason = (
+            f"Early stopping: {stale_epochs} épocas consecutivas sem superar o melhor F1 de validação"
+            if stop_reason == "patience_exhausted"
+            else f"Limite de {self.config['epochs']} épocas atingido"
+        )
+        print(f"{reason}. Melhor época: {best['epoch']} | F1={best['validation_f1_macro']:.4f}.", flush=True)
         result = {
             "best_epoch": best["epoch"], "validation_accuracy": best["validation_accuracy"],
             "validation_f1_macro": best["validation_f1_macro"], "epochs_trained": len(history),
+            "early_stopping": {
+                "monitor": "validation_f1_macro", "patience": self.config["patience"],
+                "stale_epochs": stale_epochs, "max_epochs": self.config["epochs"],
+                "stop_reason": stop_reason, "best_epoch": best["epoch"],
+            },
         }
         self.write_json("history.json", history)
         self.write_json("validation.json", result)
         return result
 
-    def fit(self, model: nn.Module, train_dataset) -> dict:
-        """Refit: treina todos os dados de desenvolvimento pelo orçamento fixado."""
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+    def fit(self, model: nn.Module, train_dataset, validation_dataset) -> dict:
+        """Treino final com early stopping; final.pt recebe os pesos de best.pt."""
         training_path = self.output_dir / "training.json"
         if training_path.exists() and (self.output_dir / "final.pt").exists():
             return json.loads(training_path.read_text(encoding="utf-8"))
 
-        model.to(self.device)
-        optimizer = self._optimizer(model)
-        start_epoch, history = 1, []
-        last_path = self.output_dir / "last.pt"
-        if last_path.exists():
-            last = torch.load(last_path, map_location=self.device, weights_only=True)
-            if last.get("mode") != "fit":
-                raise ValueError("O diretório contém validação; use outro diretório para o treino final.")
-            model.load_state_dict(last["model_state_dict"])
-            optimizer.load_state_dict(last["optimizer_state_dict"])
-            start_epoch, history = last["epoch"] + 1, last["history"]
-            self._restore_random_state(last["random_state"])
-            print(f"Retomando treino final a partir da época {start_epoch}.", flush=True)
-
-        for epoch in range(start_epoch, self.config["epochs"] + 1):
-            training = self._train_epoch(model, optimizer, train_dataset)
-            history.append({
-                "epoch": epoch,
-                "train_loss": training["loss"],
-                "train_objective": training.get("objective", training["loss"]),
-                "train_accuracy": training["accuracy"],
-                "train_f1_macro": training["f1_macro"],
-            })
-            print(
-                f"Treino final {epoch}/{self.config['epochs']} | "
-                f"F1={training['f1_macro']:.4f}, loss={training['loss']:.4f}, "
-                f"objetivo={history[-1]['train_objective']:.4f}", flush=True,
-            )
-            self._save_torch("last.pt", {
-                "mode": "fit", "config": self.config,
-                "model_state_dict": model.state_dict(), "optimizer_state_dict": optimizer.state_dict(),
-                "epoch": epoch, "history": history, "random_state": self._random_state(),
-            })
-            self.write_json("history.json", history)
-
+        validation = self.train(model, train_dataset, validation_dataset)
+        best = torch.load(self.output_dir / "best.pt", map_location=self.device, weights_only=True)
+        model.to(self.device).load_state_dict(best["model_state_dict"])
+        history = json.loads((self.output_dir / "history.json").read_text(encoding="utf-8"))
+        best_metrics = next(row for row in history if row["epoch"] == best["epoch"])
         result = {
-            "final_epoch": history[-1]["epoch"], "epochs_trained": len(history),
-            "sample_count": len(train_dataset),
-            **{name: value for name, value in history[-1].items() if name.startswith("train_")},
+            "final_epoch": best["epoch"], "best_epoch": best["epoch"],
+            "epochs_trained": validation["epochs_trained"], "sample_count": len(train_dataset),
+            "validation_sample_count": len(validation_dataset),
+            "early_stopping": validation["early_stopping"],
+            **{name: value for name, value in best_metrics.items()
+               if name.startswith(("train_", "validation_"))},
         }
-        # Também recupera o histórico se a interrupção ocorreu após salvar last.pt.
-        self.write_json("history.json", history)
         self._save_torch("final.pt", {
             "model_state_dict": model.state_dict(), "class_to_index": self.class_to_index,
-            "config": self.config, "epoch": result["final_epoch"], "training": result,
+            "config": self.config, "epoch": best["epoch"], "training": result,
         })
         self.write_json("training.json", result)
+        print(f"Modelo final: pesos da melhor validação na época {best['epoch']} "
+              f"(F1={validation['validation_f1_macro']:.4f}).", flush=True)
         return result
 
     def test(self, model: nn.Module, dataset) -> dict:

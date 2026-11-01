@@ -101,6 +101,26 @@ class ExperimentReporterTests(unittest.TestCase):
             self.reporter.write(self.history, self.result)
         self.assertFalse((self.root / "predictions.csv").exists())
 
+    def test_final_curves_include_validation_and_mark_best_f1_even_if_loss_keeps_falling(self):
+        history = [
+            {**self.history[0], "validation_loss": 0.7, "validation_f1_macro": 0.8},
+            {**self.history[1], "validation_loss": 0.5, "validation_f1_macro": 0.6},
+        ]
+        captured = {}
+
+        def save(figure, name):
+            axis = figure.axes[0]
+            captured[name] = {line.get_label(): list(line.get_ydata()) for line in axis.lines}
+            self.assertIn("early stopping", axis.get_title())
+            marker = axis.lines[-1]
+            self.assertEqual(list(marker.get_xdata()), [1, 1])
+            figure.clear()
+
+        with patch.object(self.reporter, "_save", side_effect=save):
+            self.reporter._plot_training(history)
+        self.assertEqual(captured["loss.png"]["Validação"], [0.7, 0.5])
+        self.assertEqual(captured["f1.png"]["Validação"], [0.8, 0.6])
+
     def test_rejects_logits_mislabeled_as_probabilities(self):
         self.result["metrics"]["probabilities"][0] = [0.8, 0.8, 0.8]
         with self.assertRaisesRegex(ValueError, "somar 1"):

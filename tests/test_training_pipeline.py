@@ -21,6 +21,7 @@ from models.sign_classifier import SignClassifier
 from preprocessor.landmark_processor import LandmarkProcessor
 from preprocessor.landmarks_extractor import LandmarksExtractor
 from training.config import TrainingConfig
+from training.model_selection import ModelSelection
 from training.trainer import Trainer
 from training.training_pipeline import TrainingPipeline
 
@@ -102,6 +103,32 @@ class TrainingPipelineTests(unittest.TestCase):
         )
         return self._external_config().with_overrides({"search_config": space})
 
+    def _write_imported_landmark_search(self, pipeline, processor_options, tuned_options=None):
+        """Uma busca salva mínima permite testar a importação sem executar Optuna."""
+        source = self.project_root / "previous_landmark_search"
+        source.mkdir(exist_ok=True)
+        winning_config = pipeline.config.to_dict()
+        winning_config["processor_options"] = processor_options
+        winning_config["learning_rate"] = 0.002
+        folds = [
+            {"test_signer": "03", "validation_signer": signer, "best_epoch": 1,
+             "validation_f1_macro": 0.7}
+            for signer in pipeline._validation_signers(self.rows, "03")
+        ]
+        metadata = {
+            "base_config": winning_config, "divisions": {"03": [fold["validation_signer"] for fold in folds]},
+            "dataset_signature": pipeline._dataset_signature(self.rows), "protocol_version": 2,
+            "code_signature": pipeline._code_signature(),
+            "parameters": {"processor_options": tuned_options or {}},
+        }
+        report = {"best_trial": 7, "best_validation_f1_macro": 0.7}
+        trial = {"config": winning_config, "folds": folds, "run_id": "previous_run"}
+        for filename, contents in (
+            ("search_config.json", metadata), ("search_test03.json", report), ("trial_test03_7.json", trial),
+        ):
+            (source / filename).write_text(json.dumps(contents))
+        return source
+
     def test_processor_stages_cache_and_input_formats(self):
         sample_id = self.rows[0]["sample_id"]
         processor = LandmarkProcessor(self.root)
@@ -169,7 +196,7 @@ class TrainingPipelineTests(unittest.TestCase):
         self.assertEqual(index["version"], extractor.version)
         self.assertEqual(len(index["samples"]), 6)
 
-    def test_resnet_refit_is_fresh_and_uses_all_development_signers(self):
+    def test_resnet_final_model_is_fresh_and_reserves_validation_and_test_signers(self):
         models = []
         original_create = ModelRegistry.create
         original_train = Trainer.train
@@ -190,14 +217,15 @@ class TrainingPipelineTests(unittest.TestCase):
             self.assertFalse(validation.training)
             return original_train(trainer, model, train, validation)
 
-        def verify_refit(trainer, model, dataset):
-            self.assertEqual({row["signer_id"] for row in dataset.rows}, {"01", "02"})
-            self.assertEqual(len(dataset), 4)
+        def verify_refit(trainer, model, dataset, validation):
+            self.assertEqual({row["signer_id"] for row in dataset.rows}, {"02"})
+            self.assertEqual({row["signer_id"] for row in validation.rows}, {"01"})
+            self.assertEqual(len(dataset), 2)
             initial = next(state for created, state in models if created is model)
             for name, current in model.network.state_dict().items():
                 self.assertTrue(torch.equal(current, initial[name]), name)
             refitted.append(model)
-            return original_fit(trainer, model, dataset)
+            return original_fit(trainer, model, dataset, validation)
 
         with patch.object(ModelRegistry, "create", side_effect=create):
             with patch.object(Trainer, "train", verify_split):
@@ -216,8 +244,13 @@ class TrainingPipelineTests(unittest.TestCase):
         self.assertEqual(summary["sessions"], 1)
         self.assertEqual(len(summary["folds"]), 1)
         self.assertEqual(summary["folds"][0]["test_signer"], "03")
+        self.assertEqual(summary["folds"][0]["config"]["processor_options"]["anchor"], "shoulders")
         final_dir = Path(summary["folds"][0]["run_dir"])
         self.assertTrue((final_dir / "final.pt").exists())
+        result = json.loads((final_dir / "result.json").read_text())
+        exported = json.loads((path.parent / "best_config_test03.json").read_text())
+        self.assertEqual(result["config"]["processor_options"]["anchor"], "shoulders")
+        self.assertEqual(exported["processor_options"]["anchor"], "shoulders")
         self.assertEqual(path.parent.parent, self.project_root / "runs" / "minds_libras")
         self.assertFalse((self.root / "processed" / "training").exists())
         self.assertEqual(Path(torch.hub.get_dir()), self.config.weights_dir)
@@ -249,15 +282,17 @@ class TrainingPipelineTests(unittest.TestCase):
             validation_ids = {row["signer_id"] for row in validation.rows}
             self.assertFalse(train_ids & validation_ids)
             self.assertNotIn("03", train_ids | validation_ids)
-            searched.append((train_ids, validation_ids))
+            if "final" not in trainer.output_dir.parts:
+                searched.append((train_ids, validation_ids))
             return original_train(trainer, model, train, validation)
 
-        def verify_fit(trainer, model, train):
+        def verify_fit(trainer, model, train, validation):
             self.assertEqual(len(searched), 4)
-            self.assertEqual({row["signer_id"] for row in train.rows}, {"01", "02"})
-            self.assertEqual(len(train), 4)
+            self.assertEqual({row["signer_id"] for row in train.rows}, {"02"})
+            self.assertEqual({row["signer_id"] for row in validation.rows}, {"01"})
+            self.assertEqual(len(train), 2)
             refitted.append(trainer.config.copy())
-            return original_fit(trainer, model, train)
+            return original_fit(trainer, model, train, validation)
 
         def verify_test(trainer, model, dataset):
             # O teste só é acessado depois da busca inteira e do refit único.
@@ -279,7 +314,7 @@ class TrainingPipelineTests(unittest.TestCase):
         self.assertEqual(refitted[0]["learning_rate"], winner["config"]["learning_rate"])
         summary = json.loads(path.read_text())
         self.assertEqual(summary["sessions"], 1)
-        self.assertEqual(summary["folds"][0]["epoch_selection"]["method"], "median_best_epoch")
+        self.assertEqual(summary["folds"][0]["epoch_selection"]["method"], "final_validation_early_stopping")
         self.assertEqual(summary["folds"][0]["config"]["epochs"], 1)
         self.assertEqual(report["direction"], "maximize")
         self.assertEqual(report["objective"], "mean_validation_f1_macro")
@@ -295,30 +330,44 @@ class TrainingPipelineTests(unittest.TestCase):
         self.assertEqual(len(report["trials"]), 3)
         self.assertGreaterEqual(report["best_validation_f1_macro"], expected)
 
-    def test_refit_epochs_come_from_validation_best_epochs(self):
-        config = self._external_config().with_overrides({"epochs": 6})
-        epochs = iter((3, 5))
+    def test_final_epoch_comes_from_its_own_validation_not_search_fold_median(self):
+        config = self._external_config().with_overrides({"epochs": 6, "patience": 2})
+        pipeline = TrainingPipeline(config)
+        selection = ModelSelection(config, [
+            {"best_epoch": 3}, {"best_epoch": 5},
+        ], 0.7, "saved_search")
+        self.assertEqual(selection.final_config("03").epochs, 6)
+        scores = iter((0.5, 0.8, 0.7, 0.6))
+        evaluate = Trainer._evaluate
 
-        def validation_result(trainer, model, train, validation):
-            return {
-                "best_epoch": next(epochs), "validation_accuracy": 0.75,
-                "validation_f1_macro": 0.7, "epochs_trained": 6,
-            }
+        def final_validation(trainer, model, dataset):
+            if {row["signer_id"] for row in dataset.rows} == {"01"}:
+                score = next(scores)
+                return {"loss": 1 - score, "accuracy": score, "f1_macro": score}
+            self.assertEqual({row["signer_id"] for row in dataset.rows}, {"03"})
+            self.assertTrue((trainer.output_dir / "final.pt").exists())
+            return evaluate(trainer, model, dataset)
 
-        original_fit = Trainer.fit
-        fitted_epochs = []
+        with patch.object(Trainer, "_evaluate", final_validation):
+            final = pipeline._fit_and_test(self.rows, "03", selection, pipeline.runs_dir / "saved")
+        self.assertEqual(final["config"]["epochs"], 6)
+        self.assertEqual(final["training"]["epochs_trained"], 4)
+        self.assertEqual(final["epoch_selection"]["final_epochs"], 2)
+        self.assertEqual(final["final_validation_signer"], "01")
+        self.assertEqual(final["final_validation_f1_macro"], 0.8)
+        split = final["split"]
+        self.assertFalse(set(split["train_samples"]) & set(split["validation_samples"]))
+        self.assertFalse((set(split["train_samples"]) | set(split["validation_samples"])) & set(final["test_samples"]))
 
-        def verify_fit(trainer, model, dataset):
-            fitted_epochs.append(trainer.config["epochs"])
-            return original_fit(trainer, model, dataset)
-
-        with patch.object(Trainer, "train", validation_result):
-            with patch.object(Trainer, "fit", verify_fit):
-                path = TrainingPipeline(config).train()
-        final = json.loads(path.read_text())["folds"][0]
-        self.assertEqual(fitted_epochs, [4])
-        self.assertEqual(final["epoch_selection"]["best_epochs"], [3, 5])
-        self.assertEqual(final["config"]["epochs"], 4)
+    def test_final_validation_choice_is_deterministic_and_can_be_overridden(self):
+        self.assertEqual(self.pipeline._final_validation_signer(self.rows, "03"), "01")
+        incomplete = [row for row in self.rows if not (row["signer_id"] == "01" and row["class_id"] == "02")]
+        self.assertEqual(self.pipeline._final_validation_signer(incomplete, "03"), "02")
+        explicit = TrainingPipeline(self.config.with_overrides({"final_validation_signer_id": "02"}))
+        self.assertEqual(explicit._final_validation_signer(self.rows, "03"), "02")
+        invalid = TrainingPipeline(self.config.with_overrides({"final_validation_signer_id": "03"}))
+        with self.assertRaisesRegex(ValueError, "Sinalizador ausente"):
+            invalid._final_validation_signer(self.rows, "03")
 
     def test_all_test_signers_get_one_refit_and_one_test_each(self):
         config = self._external_config().with_overrides({"test_signer_id": "all"})
@@ -338,20 +387,37 @@ class TrainingPipelineTests(unittest.TestCase):
         self.assertEqual(sorted(tested), ["01", "02", "03"])
         self.assertEqual(len(list(path.parent.rglob("final.pt"))), 3)
 
-    def test_fixed_final_epochs_can_skip_validation_for_an_exported_configuration(self):
+    def test_final_epochs_sets_a_cap_but_never_skips_final_validation(self):
         config = self._external_config().with_overrides({"final_epochs": 2})
         original_fit = Trainer.fit
         fitted = []
 
-        def record_fit(trainer, model, dataset):
+        def record_fit(trainer, model, dataset, validation):
             fitted.append(trainer.config["epochs"])
-            return original_fit(trainer, model, dataset)
+            self.assertEqual({row["signer_id"] for row in validation.rows}, {"01"})
+            return original_fit(trainer, model, dataset, validation)
 
-        with patch.object(Trainer, "train", side_effect=AssertionError("configuração final revalidada")):
+        with patch.object(TrainingPipeline, "_train_folds", side_effect=AssertionError("busca desnecessária")):
             with patch.object(Trainer, "fit", record_fit):
                 result = TrainingPipeline(config).train()
         self.assertEqual(fitted, [2])
         self.assertEqual(json.loads(result.read_text())["sessions"], 1)
+
+    def test_search_preserves_an_explicit_final_epoch_cap(self):
+        config = self._search_config(trials=1).with_overrides({"epochs": 1, "final_epochs": 2})
+        path = TrainingPipeline(config).train()
+        result = json.loads(path.read_text())["folds"][0]
+        self.assertTrue(all(fold["epochs_trained"] == 1 for fold in result["selection"]["inner_folds"]))
+        self.assertEqual(result["config"]["epochs"], 2)
+        self.assertEqual(result["training"]["epochs_trained"], 2)
+        self.assertEqual(result["epoch_selection"]["max_epochs"], 2)
+        exported = json.loads((path.parent / "best_config_test03.json").read_text())
+        self.assertEqual(exported["final_validation_signer_id"], "01")
+
+        imported = config.with_overrides({"reuse_search": path.parent, "final_epochs": 3,
+                                          "output_dir": self.project_root / "imported"})
+        selection = TrainingPipeline(imported)._import_selection(self.rows, "03")
+        self.assertEqual(selection.final_config("03").epochs, 3)
 
     def test_force_restart_creates_fresh_run_and_preserves_previous_artifacts(self):
         config = self._search_config(trials=1)
@@ -368,7 +434,7 @@ class TrainingPipelineTests(unittest.TestCase):
         with patch.object(Trainer, "train", record_train):
             second_path = TrainingPipeline(config.with_overrides({"force_restart": True})).train()
         self.assertNotEqual(second_path.parent, first_path.parent)
-        self.assertEqual(len(trained_again), 2)
+        self.assertEqual(len(trained_again), 3)
         self.assertEqual(first_path.read_bytes(), first_summary)
         for path, content in old_checkpoints.items():
             self.assertEqual(path.read_bytes(), content)
@@ -383,12 +449,13 @@ class TrainingPipelineTests(unittest.TestCase):
         original_fit = Trainer.fit
         refitted = []
 
-        def verify_fit(trainer, model, train):
-            self.assertEqual({row["signer_id"] for row in train.rows}, {"01", "02"})
+        def verify_fit(trainer, model, train, validation):
+            self.assertEqual({row["signer_id"] for row in train.rows}, {"02"})
+            self.assertEqual({row["signer_id"] for row in validation.rows}, {"01"})
             refitted.append(trainer.config.copy())
-            return original_fit(trainer, model, train)
+            return original_fit(trainer, model, train, validation)
 
-        with patch.object(Trainer, "train", side_effect=AssertionError("busca importada executada novamente")):
+        with patch.object(TrainingPipeline, "_train_folds", side_effect=AssertionError("busca importada executada novamente")):
             with patch.object(Trainer, "fit", verify_fit):
                 path = TrainingPipeline(imported).train()
         source = json.loads(original_path.read_text())["folds"][0]
@@ -407,6 +474,46 @@ class TrainingPipelineTests(unittest.TestCase):
         })
         with self.assertRaises(ValueError):
             TrainingPipeline(imported).train()
+
+    def test_imported_search_revalidates_winner_when_the_training_budget_changes(self):
+        config = self._search_config(trials=1).with_overrides({"epochs": 1, "patience": 2})
+        original_path = TrainingPipeline(config).train()
+        source = json.loads(original_path.read_text())["folds"][0]
+        imported = config.with_overrides({
+            "reuse_search": original_path.parent, "search_config": None,
+            "epochs": 5, "patience": 20, "output_dir": self.project_root / "imported_runs",
+        })
+        revalidated = []
+
+        def validation_result(trainer, model, train, validation):
+            if "final" in trainer.output_dir.parts:
+                return original_train(trainer, model, train, validation)
+            self.assertNotIn("03", {row["signer_id"] for row in train.rows + validation.rows})
+            self.assertEqual(trainer.config["epochs"], 5)
+            self.assertEqual(trainer.config["patience"], 20)
+            self.assertEqual(trainer.config["learning_rate"], source["config"]["learning_rate"])
+            revalidated.append(trainer.config["validation_signer"])
+            return {
+                "best_epoch": 3, "validation_accuracy": 0.75,
+                "validation_f1_macro": 0.75, "epochs_trained": 5,
+            }
+
+        original_train = Trainer.train
+        with patch("training.training_pipeline.HyperparameterSearch.run", side_effect=AssertionError("Optuna repetido")):
+            with patch.object(Trainer, "train", validation_result):
+                path = TrainingPipeline(imported).train()
+        result = json.loads(path.read_text())["folds"][0]
+        changes = result["selection"]["protocol_changes"]
+        self.assertEqual(changes["epochs"], {"source": 1, "current": 5})
+        self.assertEqual(changes["patience"], {"source": 2, "current": 20})
+        self.assertEqual(sorted(revalidated), ["01", "02"])
+        self.assertEqual([fold["best_epoch"] for fold in result["selection"]["inner_folds"]], [3, 3])
+        self.assertEqual(result["config"]["epochs"], 5)
+        self.assertEqual(result["training"]["epochs_trained"], 5)
+        self.assertEqual(result["config"]["patience"], 20)
+        self.assertEqual(result["selection"]["score_scope"], "current_validation")
+        self.assertTrue(result["selection"]["score_valid_for_current_protocol"])
+        self.assertEqual(result["validation_f1_macro"], 0.75)
 
     def test_import_search_rejects_changed_dataset_before_refit(self):
         config = self._search_config(trials=1)
@@ -434,7 +541,7 @@ class TrainingPipelineTests(unittest.TestCase):
             "output_dir": self.project_root / "imported_runs",
         })
         pipeline = TrainingPipeline(imported)
-        with patch.object(Trainer, "train", side_effect=AssertionError("busca importada repetida")):
+        with patch.object(TrainingPipeline, "_train_folds", side_effect=AssertionError("busca importada repetida")):
             path = pipeline.train()
         result = json.loads(path.read_text())["folds"][0]
         changes = result["selection"]["protocol_changes"]
@@ -458,12 +565,12 @@ class TrainingPipelineTests(unittest.TestCase):
         original_fit = Trainer.fit
         processed_with = []
 
-        def verify_fit(trainer, model, dataset):
+        def verify_fit(trainer, model, dataset, validation):
             processed_with.append(dataset.processor.frame_count)
             np.testing.assert_array_equal(dataset[0][0].numpy(), np.array([1.2, 0.5], dtype=np.float32))
-            return original_fit(trainer, model, dataset)
+            return original_fit(trainer, model, dataset, validation)
 
-        with patch.object(Trainer, "train", side_effect=AssertionError("busca importada repetida")):
+        with patch.object(TrainingPipeline, "_train_folds", side_effect=AssertionError("busca importada repetida")):
             with patch.object(Trainer, "fit", verify_fit):
                 path = TrainingPipeline(imported).train()
         result = json.loads(path.read_text())["folds"][0]
@@ -493,7 +600,7 @@ class TrainingPipelineTests(unittest.TestCase):
             "reuse_search": original_path.parent, "search_config": None,
             "output_dir": self.project_root / "imported_runs",
         })
-        with patch.object(Trainer, "train", side_effect=AssertionError("busca antiga repetida")):
+        with patch.object(TrainingPipeline, "_train_folds", side_effect=AssertionError("busca antiga repetida")):
             path = TrainingPipeline(imported).train()
         result = json.loads(path.read_text())["folds"][0]
         self.assertEqual(result["selection"]["protocol_changes"]["augmentation"], {"source": True, "current": False})
@@ -509,6 +616,97 @@ class TrainingPipelineTests(unittest.TestCase):
             train[0]
         with self.assertRaises(ValueError):
             TrainingPipeline(self.config.with_overrides({"processor_options": {"augmentation": True}}))
+
+    def test_candidates_reuse_the_processor_only_when_anchor_matches(self):
+        with patch.object(LandmarkProcessor, "prepare_all", autospec=True) as prepare:
+            same = self.pipeline._candidate_pipeline(self.pipeline.config.with_overrides({"epochs": 2}), self.rows)
+            self.assertIs(same.processor, self.pipeline.processor)
+            prepare.assert_not_called()
+
+            options = {**self.pipeline.config.processor_options, "anchor": "nose"}
+            changed = self.pipeline._candidate_pipeline(
+                self.pipeline.config.with_overrides({"processor_options": options}), self.rows,
+            )
+            self.assertIsNot(changed.processor, self.pipeline.processor)
+            self.assertEqual(changed.processor.anchor_name, "nose")
+            self.assertNotEqual(changed.processor.encoding_dir, self.pipeline.processor.encoding_dir)
+            prepare.assert_called_once_with(changed.processor, self.rows)
+
+    def test_import_without_anchor_keeps_current_reference_and_marks_the_old_score(self):
+        for anchor in ("shoulders", "nose"):
+            with self.subTest(anchor=anchor):
+                pipeline = TrainingPipeline(self.config.with_overrides({"processor_options": {"anchor": anchor}}))
+                old_options = dict(pipeline.config.processor_options)
+                old_options.pop("anchor")
+                source = self._write_imported_landmark_search(pipeline, old_options)
+                imported = TrainingPipeline(pipeline.config.with_overrides({"reuse_search": source}))
+
+                selection = imported._import_selection(self.rows, "03")
+
+                self.assertEqual(selection.config.processor_options["anchor"], anchor)
+                self.assertEqual(selection.config.learning_rate, 0.002)
+                self.assertEqual(selection.protocol_changes, {"anchor": {"source": "none", "current": anchor}})
+                self.assertEqual(selection.score, 0.7)
+                # O score foi medido com outro processamento e não valida o novo.
+                self.assertTrue(selection.protocol_changes)
+                self.assertEqual(selection.final_config("03").processor_options["anchor"], anchor)
+
+    def test_import_preserves_the_winning_anchor_when_it_was_a_tuned_option(self):
+        old_options = {**self.pipeline.config.processor_options, "anchor": "nose"}
+        source = self._write_imported_landmark_search(
+            self.pipeline, old_options, tuned_options={"anchor": ["shoulders", "nose"]},
+        )
+        imported = TrainingPipeline(self.pipeline.config.with_overrides({"reuse_search": source}))
+
+        selection = imported._import_selection(self.rows, "03")
+
+        self.assertEqual(imported.processor_options["anchor"], "shoulders")
+        self.assertEqual(selection.config.processor_options["anchor"], "nose")
+        self.assertEqual(selection.protocol_changes, {})
+
+    def test_search_exports_the_effective_default_anchor_in_trial_and_final_configs(self):
+        space = self.project_root / "landmark_search.toml"
+        space.write_text("n_trials = 1\nn_startup_trials = 1\n[parameters]\nlearning_rate = [0.001]\n")
+        pipeline = TrainingPipeline(self.config.with_overrides({"search_config": space}))
+        folds = [
+            {"test_signer": "03", "validation_signer": signer, "best_epoch": 1,
+             "validation_f1_macro": 0.7}
+            for signer in ("01", "02")
+        ]
+        # Este teste cobre a persistência da configuração; o refit final continua real.
+        with patch.object(TrainingPipeline, "_train_folds", return_value=folds):
+            path = pipeline.train()
+
+        report = json.loads((path.parent / "search_test03.json").read_text())
+        trial = json.loads((path.parent / "trial_test03_0.json").read_text())
+        best = json.loads((path.parent / "best_config_test03.json").read_text())
+        result = json.loads(path.read_text())["folds"][0]
+        for config in (report["trials"][0]["config"], trial["config"], best, result["config"]):
+            self.assertEqual(config["processor_options"]["anchor"], "shoulders")
+            self.assertEqual(config["processor_options"]["representation"], "image")
+            self.assertFalse(config["processor_options"]["augmentation"])
+
+    def test_cli_anchor_override_is_saved_in_the_final_result(self):
+        path = self.project_root / "anchor_experiment.toml"
+        path.write_text(
+            "model = 'resnet18'\nepochs = 1\nfinal_epochs = 1\nbatch_size = 2\n"
+            "[model_options]\npretrained = false\nhidden_size = 8\n"
+            "[processor_options]\nanchor = 'none'\n"
+        )
+        args = [
+            "libras-translator", "--train", "--dataset", str(self.root), "--config", str(path),
+            "--anchor", "nose", "--device", "cpu", "--output-dir", str(self.project_root / "cli_runs"),
+            "--weights-dir", str(self.project_root / "weights"),
+        ]
+        with patch.object(sys, "argv", args):
+            main()
+
+        summaries = list((self.project_root / "cli_runs").rglob("summary.json"))
+        self.assertEqual(len(summaries), 1)
+        result = json.loads(summaries[0].read_text())["folds"][0]
+        self.assertEqual(result["config"]["processor_options"]["anchor"], "nose")
+        saved = json.loads((Path(result["run_dir"]) / "config.json").read_text())
+        self.assertEqual(saved["processor_options"]["anchor"], "nose")
 
     def test_cli_configuration_precedence(self):
         path = self.project_root / "experiment.toml"

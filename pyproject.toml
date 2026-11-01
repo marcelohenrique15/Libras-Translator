@@ -23,11 +23,12 @@ dependencies = [
 
 [project.scripts]
 libras-translator = "cli.main:main"
+libras-camera = "application.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["cli*", "dataset*", "preprocessor*", "models*", "training*"]
+include = ["application*", "cli*", "dataset*", "preprocessor*", "models*", "training*"]
 namespaces = true

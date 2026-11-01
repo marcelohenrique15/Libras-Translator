@@ -222,5 +222,6 @@ data/*/processed/
 data/*/metadata/
 docs/*
 !docs/EXTENDING.md
+!docs/APPLICATION.md
 /runs/
 /weights/

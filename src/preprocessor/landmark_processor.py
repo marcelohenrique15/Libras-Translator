@@ -47,6 +47,7 @@ class LandmarkProcessor():
         frame_count: int = 64,
         image_size: int = 224,
         augmentation: bool = False,
+        anchor: str = "shoulders",
     ) -> None:
         if subset not in self.SUBSETS:
             raise ValueError(f"Subset desconhecido: {subset}. Use: {', '.join(self.SUBSETS)}.")
@@ -56,6 +57,8 @@ class LandmarkProcessor():
             raise ValueError("frame_count e image_size devem ser positivos.")
         if augmentation:
             raise ValueError("Este experimento não permite data augmentation.")
+        if anchor not in {"shoulders", "nose", "none"}:
+            raise ValueError("Use anchor='shoulders', 'nose' ou 'none'.")
 
         self.landmarks_dir = dataset_root / "processed" / "landmarks"
         self.landmark_groups = self.SUBSETS[subset]
@@ -66,6 +69,14 @@ class LandmarkProcessor():
         self.frame_count = frame_count
         self.image_size = image_size
         self.augmentation = augmentation
+        self.anchor_name = anchor
+        point_names = [
+            (group, point)
+            for group, points in self.landmark_groups
+            for point in points
+        ]
+        anchor_points = {"shoulders": (11, 12), "nose": (0,), "none": ()}
+        self.anchor_indices = [point_names.index(("pose", point)) for point in anchor_points[anchor]]
 
         code_version = sha256(Path(__file__).read_bytes()).hexdigest()
         selection_options = {"code": code_version, "subset": subset}
@@ -75,6 +86,7 @@ class LandmarkProcessor():
             "imputation": imputation,
             "representation": representation,
             "size": image_size if representation == "image" else frame_count,
+            "anchor": anchor,
         }
         processed_dir = dataset_root / "processed"
         self.selection_dir = processed_dir / "selected_landmarks" / subset / self._version(selection_options)
@@ -95,6 +107,7 @@ class LandmarkProcessor():
         return landmarks
 
     def impute(self, sample_id: str) -> np.ndarray:
+        """Interpola lacunas; ausências não resolvidas continuam como NaN."""
         csv_path = self.landmarks_dir / f"{sample_id}.csv"
         cache_path = self.imputation_dir / f"{sample_id}.npy"
         if self._is_current(cache_path, csv_path):
@@ -107,11 +120,30 @@ class LandmarkProcessor():
         return landmarks
 
     def prepare(self, sample_id: str) -> np.ndarray:
-        if self.imputation:
-            return self.impute(sample_id)
-        return np.nan_to_num(self.select(sample_id), nan=0.0)
+        landmarks = self.impute(sample_id) if self.imputation else self.select(sample_id)
+        try:
+            return self.anchor(landmarks)
+        except ValueError as error:
+            raise ValueError(f"Amostra {sample_id}: {error}") from error
+
+    def anchor(self, landmarks: np.ndarray) -> np.ndarray:
+        """Centraliza o vídeo sem remover trajetórias nem preencher ausências."""
+        landmarks = np.asarray(landmarks, dtype=np.float32)
+        if self.anchor_name == "none":
+            return landmarks.copy()
+
+        anchor_points = landmarks[:, self.anchor_indices, :]
+        # Os dois ombros precisam ter X e Y válidos no mesmo frame.
+        valid_frames = np.isfinite(anchor_points).all(axis=(1, 2))
+        if not valid_frames.any():
+            raise ValueError(f"Não há frames válidos para a ancoragem '{self.anchor_name}'.")
+
+        centers = anchor_points[valid_frames].mean(axis=1)
+        reference = np.median(centers, axis=0)
+        return landmarks - reference
 
     def encode(self, landmarks: np.ndarray) -> np.ndarray:
+        """Codifica os pontos já preparados, mantendo NaN até esta etapa."""
         if self.representation == "sequence":
             return self._encode_sequence(landmarks)
         return self._encode(landmarks)
@@ -139,7 +171,8 @@ class LandmarkProcessor():
         if stage == "impute" or (stage == "encode" and self.imputation):
             steps.append(("Imputação das coordenadas", self.impute, self.imputation_dir))
         if stage == "encode":
-            steps.append((f"Codificação como {self.representation}", self.process, self.encoding_dir))
+            description = f"Ancoragem fixa ({self.anchor_name}) e codificação como {self.representation}"
+            steps.append((description, self.process, self.encoding_dir))
 
         for description, operation, cache_dir in steps:
             print(f"{description}...", flush=True)
@@ -175,7 +208,8 @@ class LandmarkProcessor():
                 limit=5,
                 limit_direction="both",
             )
-        return landmarks.fillna(0).to_numpy(dtype=np.float32).reshape(-1, self.landmark_count, 2)
+        # NaN precisa sobreviver à ancoragem: zero relativo é uma posição válida.
+        return landmarks.to_numpy(dtype=np.float32).reshape(-1, self.landmark_count, 2)
 
     def _encode(self, landmarks: np.ndarray) -> np.ndarray:
         if len(landmarks) < 3:
@@ -185,8 +219,15 @@ class LandmarkProcessor():
         x = landmarks[:frame_count, :, 0].T.reshape(point_count, -1, 3)
         y = landmarks[:frame_count, :, 1].T.reshape(point_count, -1, 3)
         image = np.concatenate((x, y), axis=1)
-        image = np.uint8(np.clip(image, 0, 1) * 255)
-        image = Image.fromarray(image).resize(
+        valid = np.isfinite(image)
+        pixels = np.zeros(image.shape, dtype=np.uint8)
+        if self.anchor_name == "none":
+            pixels[valid] = np.clip(image[valid], 0, 1) * 255
+        else:
+            # Intervalo fixo [-1, 1]: origem=128, válidos=1..255, ausência=0.
+            values = (np.clip(image[valid], -1, 1) + 1) / 2
+            pixels[valid] = 1 + np.rint(254 * values)
+        image = Image.fromarray(pixels).resize(
             (self.image_size, self.image_size), Image.Resampling.BILINEAR,
         )
         return np.ascontiguousarray(np.asarray(image).transpose(2, 0, 1), dtype=np.float32) / 255
@@ -194,7 +235,9 @@ class LandmarkProcessor():
     def _encode_sequence(self, landmarks: np.ndarray) -> np.ndarray:
         if len(landmarks) == 0:
             raise ValueError("A codificação como sequência precisa de pelo menos 1 frame.")
-        coordinates = landmarks.reshape(len(landmarks), -1)
+        # Sequências mantêm coordenadas relativas; RGB usa outra representação.
+        coordinates = np.nan_to_num(landmarks, nan=0.0, posinf=0.0, neginf=0.0)
+        coordinates = coordinates.reshape(len(landmarks), -1)
         source_time = np.linspace(0, 1, len(landmarks))
         target_time = np.linspace(0, 1, self.frame_count)
         sequence = np.empty((self.frame_count, coordinates.shape[1]), dtype=np.float32)

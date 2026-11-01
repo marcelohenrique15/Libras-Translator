@@ -1,0 +1,47 @@
+{
+  "dataset": "data/minds_libras",
+  "dataset_format": "minds_libras",
+  "model": "resnet18",
+  "processor": "landmarks",
+  "test_signer_id": "05",
+  "validation_signer_id": null,
+  "final_validation_signer_id": "01",
+  "epochs": 1000,
+  "batch_size": 16,
+  "learning_rate": 0.00033146118170721293,
+  "weight_decay": 0.01,
+  "l1_lambda": 1e-08,
+  "l2_lambda": 1e-05,
+  "label_smoothing": 0.05,
+  "gradient_clip": 2.0,
+  "patience": 20,
+  "final_epochs": 1000,
+  "device": "cuda:0",
+  "num_workers": 4,
+  "seed": 42,
+  "output_dir": "runs",
+  "weights_dir": "weights",
+  "model_options": {
+    "pretrained": true,
+    "hidden_size": 512,
+    "num_layers": 1,
+    "dropout": 0.6210416392424439,
+    "trainable_layers": [
+      "layer3",
+      "layer4",
+      "fc"
+    ]
+  },
+  "processor_options": {
+    "subset": "asl_2nd",
+    "imputation": true,
+    "anchor": "shoulders",
+    "augmentation": false,
+    "image_size": 224,
+    "representation": "image"
+  },
+  "search_config": null,
+  "search_trials": null,
+  "reuse_search": null,
+  "force_restart": false
+}
