@@ -27,6 +27,26 @@ from training.training_pipeline import TrainingPipeline
 
 
 class TrainingPipelineTests(unittest.TestCase):
+    def test_benchmark_command_adds_timings_to_saved_test_without_training_or_evaluation(self):
+        config = self._external_config()
+        summary_path = TrainingPipeline(config).train()
+        summary = json.loads(summary_path.read_text())
+        run_dir = Path(summary["folds"][0]["run_dir"])
+        original = json.loads((run_dir / "test.json").read_text())
+        original.pop("performance")
+        (run_dir / "test.json").write_text(json.dumps(original))
+        (run_dir / "performance.json").unlink()
+        with patch.object(Trainer, "train", side_effect=AssertionError("Treino repetido")), \
+                patch.object(Trainer, "_evaluate", side_effect=AssertionError("Avaliação repetida")), \
+                patch.object(sys, "argv", ["libras-translator", "--benchmark-run", str(run_dir),
+                                         "--dataset", str(self.root), "--device", "cpu"]):
+            main()
+        result = json.loads((run_dir / "test.json").read_text())
+        self.assertEqual(result["metrics"], original["metrics"])
+        self.assertEqual([row["sample_id"] for row in result["performance"]["samples"]], original["sample_ids"])
+        self.assertTrue((run_dir / "graphs/performance.png").is_file())
+        self.assertEqual(json.loads((run_dir / "result.json").read_text())["performance"], result["performance"])
+
     def setUp(self):
         torch.set_num_threads(2)
         self.temporary_dir = tempfile.TemporaryDirectory()

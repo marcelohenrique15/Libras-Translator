@@ -8,6 +8,8 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
+from training.inference_benchmark import InferenceBenchmark
+
 
 class Trainer():
     """Treina folds para seleção e um modelo final sem usar dados de teste."""
@@ -137,16 +139,37 @@ class Trainer():
 
     def test(self, model: nn.Module, dataset) -> dict:
         test_path = self.output_dir / "test.json"
-        if test_path.exists():
-            return json.loads(test_path.read_text(encoding="utf-8"))
+        performance_path = self.output_dir / "performance.json"
+        if test_path.exists() and performance_path.exists():
+            result = json.loads(test_path.read_text(encoding="utf-8"))
+            if "performance" not in result:
+                result["performance"] = json.loads(performance_path.read_text(encoding="utf-8"))
+                self.write_json("test.json", result)
+            return result
         checkpoint_path = self.output_dir / "final.pt"
         if not checkpoint_path.exists():
             checkpoint_path = self.output_dir / "best.pt"
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
         model.to(self.device).load_state_dict(checkpoint["model_state_dict"])
-        result = {"metrics": self._evaluate(model, dataset), "sample_ids": [row["sample_id"] for row in dataset.rows]}
+        after_accuracy_evaluation = not test_path.exists()
+        if test_path.exists():
+            result = json.loads(test_path.read_text(encoding="utf-8"))
+        else:
+            result = {"metrics": self._evaluate(model, dataset), "sample_ids": [row["sample_id"] for row in dataset.rows]}
+        result["performance"] = InferenceBenchmark(self.device).run(
+            model, dataset, after_accuracy_evaluation=after_accuracy_evaluation,
+        )
+        result["performance"].update({
+            "checkpoint": str(checkpoint_path.resolve()), "checkpoint_epoch": checkpoint.get("epoch"),
+            "model": self.config.get("model"), "dataset_root": str(self.config.get("dataset", "")),
+        })
+        self.write_json("performance.json", result["performance"])
         self.write_json("test.json", result)
         print(f"Teste: F1-macro={result['metrics']['f1_macro']:.4f}", flush=True)
+        performance = result["performance"]
+        print(f"Inferência (lote 1): média={performance['timings']['inference_ms']['mean']:.2f} ms | "
+              f"p95={performance['timings']['inference_ms']['p95']:.2f} ms | "
+              f"processamento={performance['throughput_samples_per_second']:.2f} amostras/s", flush=True)
         return result
 
     def write_json(self, name: str, data) -> None:

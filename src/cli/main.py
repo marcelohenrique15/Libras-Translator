@@ -9,6 +9,8 @@ def main() -> None:
     for command in ("build-manifest", "split-manifest", "extract-landmarks", "select-landmarks", "impute-landmarks", "encode-landmarks", "train"):
         commands.add_argument(f"--{command}", nargs="?", const=True, type=Path, metavar="DATASET_ROOT")
     commands.add_argument("--list-models", action="store_true")
+    commands.add_argument("--benchmark-run", type=Path, metavar="FINAL_TEST_DIR",
+                          help="Mede inferência de um teste salvo, sem treinar; aceita --dataset e --device")
 
     parser.add_argument("--config", type=Path, help="Configuração TOML ou JSON")
     parser.add_argument("--dataset", type=Path, help="Nome em data/ ou caminho do dataset")
@@ -59,6 +61,12 @@ def main() -> None:
 
         for name in ModelRegistry.names():
             print(f"{name}: entrada {ModelRegistry.input_format(name)}")
+        return
+
+    if args.benchmark_run is not None:
+        from training.saved_benchmark import benchmark_saved_run
+
+        benchmark_saved_run(args.benchmark_run, args.dataset, args.device or "auto")
         return
 
     from training.config import TrainingConfig

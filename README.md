@@ -188,6 +188,8 @@ O console informa o caminho de `summary.json`. Cada teste externo produz um dire
 | `config.json`, `training.json`, `validation.json`, `result.json`, `test.json` | Configuração, melhor época, parada, divisão de treino/validação/teste, origem da busca e métricas |
 | `history.json` | Métricas de treino e validação em cada época do treinamento final |
 | `predictions.csv`, `per_class.csv` | Previsões com confiança softmax e métricas por classe |
+| `performance.json`, `performance_samples.csv` | Ambiente da medição, latências e tempos por amostra do teste |
+| `graphs/performance.png` | Tempos médios por etapa e latência por amostra |
 | `graphs/loss.png`, `graphs/f1.png` | Curvas de treino e validação final, objetivo regularizado e indicação da melhor época pelo F1 |
 | `graphs/validation_loss.png`, `graphs/validation_f1_macro.png` | Curvas internas da configuração vencedora, quando disponíveis |
 | `graphs/search.png` | Evolução da busca Optuna, quando disponível |
@@ -196,6 +198,58 @@ O console informa o caminho de `summary.json`. Cada teste externo produz um dire
 As curvas `loss.png` e `f1.png` usam o próprio treino final e sua validação. `validation_loss.png` e `validation_f1_macro.png` continuam mostrando as divisões internas da busca. Os resultados antigos de duração fixa permanecem legíveis, mas não possuem curvas de validação final; essas curvas exigem executar o novo protocolo. A confiança softmax é a probabilidade atribuída pelo modelo à classe prevista; não implica calibração de confiança.
 
 A pessoa de validação final pode ter participado das validações da busca; ela é um controle de desenvolvimento, não um segundo teste independente. Somente a pessoa reservada para teste mede a avaliação externa. Reservar validação final também reduz a quantidade de vídeos usados para ajustar os pesos e não garante melhora no teste.
+
+### Desempenho da inferência
+
+Depois da avaliação de acerto, o teste executa uma passagem adicional em modo de
+inferência, com **lote 1**, sem prefetch e com três chamadas de aquecimento excluídas
+dos tempos. Usa o mesmo melhor checkpoint. Não mede as validações da busca Optuna.
+Os arquivos `test.json` e `result.json` também recebem a seção `performance`.
+
+- `data_ms`: leitura/preparo da entrada pelo dataset, incluindo acesso ao cache.
+- `transfer_ms`: envio da entrada ao dispositivo.
+- `inference_ms`: execução do modelo e softmax, sem a transferência dos dados.
+- `postprocess_ms`: retorno das probabilidades à CPU e conversão para lista.
+- `processing_ms`: soma dessas etapas para uma amostra.
+
+Cada etapa registra média, mediana, p95, p99, mínimo, máximo, desvio padrão e total.
+O p95 indica o tempo abaixo do qual ficaram 95% das medições. As taxas registradas
+são **amostras/janelas por segundo**, tanto só do modelo quanto do processamento;
+não são FPS da câmera, pois uma entrada pode representar um vídeo inteiro.
+
+O relatório inclui data UTC, CPU/GPU, versões do Python/PyTorch/CUDA, threads,
+formato/tipo da entrada, aquecimento e tamanho de lote. Registra também se houve
+avaliação de acerto nesta sessão: ela pode aquecer os caches, que não são limpos
+nem têm estado garantido. O total exclui carga do checkpoint, decodificação do vídeo
+bruto, extração de landmarks, coleta da janela temporal e interface. Não permite
+concluir sozinho a latência ou a fluidez da webcam. Em GPU compartilhada, outros
+processos também podem afetar os tempos.
+
+CUDA é sincronizada nas fronteiras de cada etapa para não medir apenas o envio
+assíncrono de operações. Aquecimento e sincronização seguem os cuidados da
+[documentação de benchmark do PyTorch](https://docs.pytorch.org/docs/stable/benchmark_utils.html).
+O benchmark é serial e inclui o custo dessas sincronizações.
+
+Ao reutilizar uma execução que já tem `test.json` mas não tem `performance.json`,
+o pipeline acrescenta a medição usando os pesos salvos e preserva as métricas de
+acerto existentes. Quando ambos existem, reutiliza também os tempos e sua data
+original. Não há estimativa retroativa de tempos a partir dos logs antigos.
+
+Para medir um teste já concluído, sem buscar hiperparâmetros nem treinar novamente:
+
+```bash
+libras-translator --benchmark-run runs/.../final/test_05/val_01/EXECUCAO \
+  --dataset data/minds_libras --device cpu
+```
+
+Informe a pasta que contém `test.json` e `final.pt` (ou `best.pt`). Esse comando
+preserva os resultados de acerto e acrescenta o benchmark. Se já houver medição,
+ela é reutilizada com seu dispositivo e data originais. As medições antigas não
+são migradas para o dispositivo informado. Para um novo benchmark independente,
+copie o checkpoint e `test.json` para outra pasta, sem `performance.json`.
+Esse caminho explícito também evita criar outro treino quando uma alteração de
+código muda o identificador da execução. O `result.json` local é atualizado, mas
+o comando isolado não reescreve o `summary.json` da busca original.
 
 ## Organização e extensão
 

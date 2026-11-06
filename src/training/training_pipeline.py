@@ -479,11 +479,16 @@ class TrainingPipeline():
 
         print(f"6. Teste reservado | sinalizador {test_signer} | {len(test_rows)} vídeos", flush=True)
         test_path = final_dir / "test.json"
-        if test_path.exists():
+        performance_path = final_dir / "performance.json"
+        if test_path.exists() and performance_path.exists():
             test = json.loads(test_path.read_text(encoding="utf-8"))
-            print("Reutilizando teste concluído.", flush=True)
+            test["performance"] = json.loads(performance_path.read_text(encoding="utf-8"))
+            print("Reutilizando teste e benchmark concluídos.", flush=True)
         else:
-            test = trainer.test(pipeline._create_model(rows, load_checkpoint=True), SignDataset(test_rows, pipeline.processor, mapping))
+            test = trainer.test(
+                pipeline._create_model(rows, load_checkpoint=True),
+                SignDataset(test_rows, pipeline.processor, mapping),
+            )
 
         result = {
             "test_signer": test_signer, "config": config.to_dict(), "epoch_selection": epoch_selection,
@@ -501,7 +506,8 @@ class TrainingPipeline():
                 "validation_signer": validation_signer,
                 "validation_samples": [row["sample_id"] for row in validation_rows],
             },
-            "test": test["metrics"], "test_samples": test["sample_ids"], "run_dir": str(final_dir.resolve()),
+            "test": test["metrics"], "performance": test.get("performance"),
+            "test_samples": test["sample_ids"], "run_dir": str(final_dir.resolve()),
         }
         trainer.write_json("result.json", result)
         labels = {row["class_id"]: row.get("label", row["class_id"]) for row in rows}

@@ -44,11 +44,27 @@ class ExperimentReporter:
         self._plot_confusion(matrix, normalized=False)
         self._plot_confusion(matrix, normalized=True)
         self._plot_per_class(per_class)
+        if test_result.get("performance"):
+            self.write_performance(test_result["performance"])
         if search_report is not None:
             self._plot_search(search_report)
         if validation_histories:
             self._plot_validation(validation_histories, "loss", "Perda")
             self._plot_validation(validation_histories, "f1_macro", "F1 macro")
+
+    def write_performance(self, performance: dict) -> None:
+        self._write_csv("performance_samples.csv", performance["samples"])
+        figure = Figure(figsize=(11, 4), layout="constrained")
+        stages_axis, latency_axis = figure.subplots(1, 2)
+        names = ["data_ms", "transfer_ms", "inference_ms", "postprocess_ms"]
+        stages_axis.bar(["Dados", "Transferência", "Modelo", "Saída CPU"],
+                        [performance["timings"][name]["mean"] for name in names])
+        stages_axis.set(title="Tempo médio por etapa · lote 1", ylabel="Milissegundos")
+        latency_axis.plot([row["processing_ms"] for row in performance["samples"]], label="Processamento")
+        latency_axis.plot([row["inference_ms"] for row in performance["samples"]], label="Modelo")
+        latency_axis.set(title="Latência por amostra · após aquecimento", xlabel="Índice da amostra", ylabel="Milissegundos")
+        latency_axis.legend()
+        self._save(figure, "performance.png")
 
     def _prediction_rows(self, result: dict) -> list[dict]:
         metrics = result["metrics"]
