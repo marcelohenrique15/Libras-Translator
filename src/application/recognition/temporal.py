@@ -7,18 +7,19 @@ from math import ceil
 
 import numpy as np
 
-from application.types import Candidate
-
 
 class LandmarkWindow:
     """Guarda somente os pontos necessários para uma janela de vídeo."""
 
-    def __init__(self, seconds: float, sample_fps: float, max_gap: float) -> None:
+    def __init__(self, seconds: float, sample_fps: float, max_gap: float, minimum_seconds: float | None = None) -> None:
         if min(seconds, sample_fps, max_gap) <= 0:
             raise ValueError("Duração, frequência e intervalo máximo devem ser positivos.")
         self.seconds = seconds
         self.sample_fps = sample_fps
         self.max_gap = max_gap
+        self.minimum_seconds = min(seconds, minimum_seconds) if minimum_seconds is not None else seconds
+        if self.minimum_seconds <= 0:
+            raise ValueError("A duração mínima precisa ser positiva.")
         # O limite de quantidade protege também contra uma fonte com FPS incorreto.
         self._samples: deque[tuple[float, np.ndarray]] = deque(
             maxlen=max(3, ceil(seconds * sample_fps * 4) + 2),
@@ -59,10 +60,24 @@ class LandmarkWindow:
 
     @property
     def progress(self) -> float:
+        return min(1.0, self.duration / self.minimum_seconds)
+
+    @property
+    def duration(self) -> float:
         if len(self._samples) < 2:
             return 0.0
-        duration = self._samples[-1][0] - self._samples[0][0]
-        return min(1.0, duration / self.seconds)
+        return min(self.seconds, self._samples[-1][0] - self._samples[0][0])
+
+    @property
+    def full(self) -> bool:
+        return self.duration >= self.seconds - 1e-9
+
+    def keep_recent(self, seconds: float) -> None:
+        """Conserva um pequeno pré-contexto ao iniciar outro gesto."""
+        if self._samples:
+            cutoff = self._samples[-1][0] - seconds
+            while len(self._samples) > 1 and self._samples[0][0] < cutoff:
+                self._samples.popleft()
 
     @property
     def ready(self) -> bool:
@@ -81,8 +96,9 @@ class LandmarkWindow:
         times = np.array([timestamp for timestamp, _ in self._samples])
         points = np.stack([points for _, points in self._samples])
         end = times[-1]
-        count = max(3, round(self.seconds * self.sample_fps / 3) * 3)
-        grid = np.linspace(end - self.seconds, end, count)
+        # Prefixos usam somente o tempo já observado, sem inventar frames futuros.
+        count = max(3, round(self.duration * self.sample_fps / 3) * 3)
+        grid = np.linspace(end - self.duration, end, count)
         right = np.searchsorted(times, grid, side="left").clip(0, len(times) - 1)
         left = (right - 1).clip(0)
         interval = times[right] - times[left]
@@ -98,27 +114,3 @@ class LandmarkWindow:
         exact = np.isclose(grid, times[right], rtol=0, atol=1e-9)
         result[exact] = after[exact]
         return result.astype(np.float32)
-
-
-class PredictionStability:
-    """Uma palavra só aparece após concordância entre previsões consecutivas."""
-
-    def __init__(self, confidence: float, count: int) -> None:
-        self.confidence = confidence
-        self.required_count = count
-        self.reset()
-
-    def reset(self) -> None:
-        self._class_id: str | None = None
-        self._count = 0
-        self.caption = ""
-
-    def update(self, candidates: tuple[Candidate, ...]) -> str:
-        if not candidates or candidates[0].confidence < self.confidence:
-            self.reset()
-            return ""
-        best = candidates[0]
-        self._count = self._count + 1 if best.class_id == self._class_id else 1
-        self._class_id = best.class_id
-        self.caption = best.label if self._count >= self.required_count else ""
-        return self.caption

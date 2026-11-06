@@ -3,8 +3,7 @@ from pathlib import Path
 
 import numpy as np
 
-from application.recognition.temporal import LandmarkWindow, PredictionStability
-from application.types import Candidate
+from application.recognition.temporal import LandmarkWindow
 
 
 class LandmarkWindowTests(unittest.TestCase):
@@ -77,28 +76,27 @@ class LandmarkWindowTests(unittest.TestCase):
         np.testing.assert_array_equal(encoded[2, :, -1], np.ones(60))
 
 
-class PredictionStabilityTests(unittest.TestCase):
-    def test_only_repeated_high_confidence_predictions_release_one_word(self):
-        stability = PredictionStability(confidence=0.7, count=3)
-        high = (Candidate("01", "Acontecer", 0.9),)
-        low = (Candidate("01", "Acontecer", 0.6),)
-        self.assertEqual(stability.update(high), "")
-        self.assertEqual(stability.update(high), "")
-        self.assertEqual(stability.update(high), "Acontecer")
-        self.assertEqual(stability.update(low), "")
-        self.assertEqual(stability.update(high), "")
-        self.assertEqual(stability.update(()), "")
+    def test_growing_window_emits_only_observed_prefix_without_padding(self):
+        window = LandmarkWindow(seconds=6, sample_fps=10, max_gap=.2, minimum_seconds=.6)
+        for timestamp in np.arange(0, .7, .1):
+            window.append(float(timestamp), np.array([[timestamp, timestamp]]))
+        self.assertTrue(window.ready)
+        self.assertFalse(window.full)
+        self.assertEqual(window.resample().shape, (6, 1, 2))
+        np.testing.assert_allclose(window.resample()[:, 0, 0], np.linspace(0, .6, 6))
+        for timestamp in np.arange(.7, 6.2, .1):
+            window.append(float(timestamp), np.array([[timestamp, timestamp]]))
+        self.assertTrue(window.full)
+        self.assertEqual(len(window.resample()), 60)
+        np.testing.assert_allclose(window.resample()[[0, -1], 0, 0], [.1, 6.1], atol=1e-6)
 
-    def test_change_of_class_immediately_clears_the_previous_caption(self):
-        stability = PredictionStability(confidence=0.7, count=2)
-        first = (Candidate("01", "Acontecer", 0.9),)
-        second = (Candidate("02", "Aluno", 0.95),)
-        stability.update(first)
-        self.assertEqual(stability.update(first), "Acontecer")
-        self.assertEqual(stability.update(second), "")
-        self.assertEqual(stability.update(second), "Aluno")
-        stability.reset()
-        self.assertEqual(stability.caption, "")
+    def test_new_gesture_keeps_only_short_preroll(self):
+        window = LandmarkWindow(seconds=6, sample_fps=10, max_gap=.2, minimum_seconds=.6)
+        for timestamp in np.arange(0, 2.1, .1):
+            window.append(float(timestamp), np.array([[timestamp, timestamp]]))
+        window.keep_recent(.3)
+        self.assertLessEqual(window.duration, .3 + 1e-9)
+        self.assertFalse(window.ready)
 
 
 if __name__ == "__main__":

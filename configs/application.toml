@@ -9,12 +9,16 @@ window_height = 720
 fps = 30.0
 device = "auto"
 
-# Uma janela completa é necessária antes da primeira classificação.
-window_seconds = 3.0
+# O contexto cresce; não é necessário esperar o limite para emitir hipóteses.
+window_seconds = 6.0
+min_window_seconds = 0.6
 sample_fps = 30.0
-prediction_interval = 0.3
+prediction_interval = 0.15
 confidence_threshold = 0.7
-stability_count = 3
+preview_confidence_threshold = 0.5
+stability_count = 2
+caption_hold_seconds = 2.0
+hand_pause_seconds = 0.6
 max_frame_gap = 0.35
 person_timeout = 0.6
 max_prediction_age = 1.2

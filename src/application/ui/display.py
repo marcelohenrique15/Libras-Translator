@@ -18,7 +18,9 @@ class OpenCVDisplay:
         if sys.platform.startswith("linux") and not (os.getenv("DISPLAY") or os.getenv("WAYLAND_DISPLAY")):
             raise RuntimeError("Sessão gráfica não encontrada. Use --headless para executar sem janela.")
         import cv2
-        cv2.namedWindow(self.title, cv2.WINDOW_NORMAL)
+        # Preenche a área útil ao redimensionar, sem barras extras do OpenCV.
+        flags = cv2.WINDOW_NORMAL | cv2.WINDOW_FREERATIO | cv2.WINDOW_GUI_NORMAL
+        cv2.namedWindow(self.title, flags)
         self._opened = True
         cv2.resizeWindow(self.title, self.width, self.height)
 

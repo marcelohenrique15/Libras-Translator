@@ -222,25 +222,26 @@ class RecognitionPipelineTests(unittest.TestCase):
             self.warm_up()
         self.assertTrue(self.detector.closed)
 
-    def test_waits_for_complete_window_then_repeated_predictions_before_caption(self):
+    def test_hypothesis_appears_before_confirmation(self):
         with self.pipeline:
             for timestamp in (0, 0.1, 0.2):
                 result = self.pipeline.process(self.frame(timestamp))
                 self.assertEqual(result.candidates, ())
             result = self.pipeline.process(self.frame(0.3))
             self.assertEqual(len(result.candidates), 3)
-            self.assertEqual(result.caption, "")
+            self.assertEqual(result.caption, "Acontecer")
+            self.assertTrue(result.caption_is_partial)
             self.assertEqual(result.progress, 1)
             result = self.pipeline.process(self.frame(0.35))
             self.assertEqual(len(self.classifier.windows), 1)
-            self.assertEqual(result.caption, "")
+            self.assertTrue(result.caption_is_partial)
             result = self.pipeline.process(self.frame(0.4))
             self.assertEqual(len(self.classifier.windows), 2)
             self.assertEqual(result.caption, "Acontecer")
             self.assertEqual(result.prediction_timestamp, 0.4)
             self.assertIs(self.detector.images[0], self.image)
 
-    def test_losing_hands_removes_caption_without_erasing_the_person_context(self):
+    def test_brief_hand_dropout_preserves_stable_caption_and_context(self):
         with self.pipeline:
             self.assertEqual(self.warm_up().caption, "Acontecer")
             previous = self.detector.observation
@@ -248,15 +249,17 @@ class RecognitionPipelineTests(unittest.TestCase):
             points[2:] = np.nan
             self.detector.observation = LandmarkObservation(points, previous.box, False)
             missing = self.pipeline.process(self.frame(0.5))
-            self.assertEqual(missing.caption, "")
-            self.assertEqual(missing.candidates, ())
+            self.assertEqual(missing.caption, "Acontecer")
+            self.assertFalse(missing.caption_is_partial)
+            self.assertEqual(len(missing.candidates), 3)
             self.assertEqual(missing.progress, 1)
             self.assertEqual(missing.box, previous.box)
             self.assertEqual(len(self.classifier.windows), 2)
             self.detector.observation = previous
             result = self.pipeline.process(self.frame(0.6))
             self.assertEqual(len(result.candidates), 3)
-            self.assertEqual(result.caption, "")
+            self.assertEqual(result.caption, "Acontecer")
+            self.assertFalse(result.caption_is_partial)
             self.assertEqual(result.progress, 1)
             self.assertEqual(len(self.classifier.windows), 3)
             self.assertTrue(np.isnan(self.classifier.windows[-1][-2, 2:]).all())
@@ -307,18 +310,19 @@ class RecognitionPipelineTests(unittest.TestCase):
             points[0] = np.nan
             self.detector.observation = LandmarkObservation(points, previous.box, True)
             result = self.pipeline.process(self.frame(0.5))
-            self.assertEqual(result.candidates, ())
-            self.assertEqual(result.caption, "")
+            self.assertEqual(len(self.classifier.windows), 2)
+            self.assertEqual(result.caption, "Acontecer")
             self.assertIn("Enquadre", result.status)
 
-    def test_low_confidence_or_different_word_does_not_keep_previous_caption(self):
+    def test_new_word_is_provisional_before_stabilizing(self):
         with self.pipeline:
             self.warm_up()
             self.classifier.candidates = (Candidate("02", "Aluno", 0.6),)
             result = self.pipeline.process(self.frame(0.5))
-            self.assertEqual(result.caption, "")
+            self.assertEqual(result.caption, "Aluno")
+            self.assertTrue(result.caption_is_partial)
             self.classifier.candidates = (Candidate("02", "Aluno", 0.95),)
-            self.assertEqual(self.pipeline.process(self.frame(0.6)).caption, "")
+            self.assertTrue(self.pipeline.process(self.frame(0.6)).caption_is_partial)
             self.assertEqual(self.pipeline.process(self.frame(0.7)).caption, "Aluno")
 
     def test_reset_and_body_jump_do_not_mix_windows_from_different_people(self):
@@ -339,8 +343,90 @@ class RecognitionPipelineTests(unittest.TestCase):
             result = self.pipeline.process(self.frame(0))
             self.assertEqual(result.progress, 0)
 
+    def test_single_gesture_closes_once_and_stable_word_survives_hand_pause(self):
+        from dataclasses import replace
+
+        config = replace(self.config, window_seconds=2, min_window_seconds=.3,
+                         hand_pause_seconds=.2, caption_hold_seconds=.5)
+        pipeline = RecognitionPipeline(config, classifier_factory=lambda _: self.classifier,
+                                       detector_factory=lambda _: self.detector)
+        with pipeline:
+            for timestamp in (0, .1, .2, .3, .4, .5, .6):
+                result = pipeline.process(self.frame(timestamp))
+            self.assertTrue(result.caption_is_partial)
+            self.assertEqual(result.caption, "Acontecer")
+            visible = self.detector.observation
+            points = visible.points.copy()
+            points[2:] = np.nan
+            self.detector.observation = LandmarkObservation(points, visible.box, False)
+            for timestamp in (.7, .8, .9):
+                result = pipeline.process(self.frame(timestamp))
+            self.assertEqual(result.caption, "Acontecer")
+            self.assertFalse(result.caption_is_partial)
+            calls_after_closing = len(self.classifier.windows)
+            self.assertEqual(pipeline.process(self.frame(1.0)).caption, "Acontecer")
+            self.assertEqual(len(self.classifier.windows), calls_after_closing)
+            for timestamp in (1.1, 1.2, 1.3, 1.4, 1.5):
+                result = pipeline.process(self.frame(timestamp))
+            self.assertEqual(result.caption, "")
+            # O gesto seguinte não recebe as mãos do primeiro na sua entrada.
+            self.detector.observation = LandmarkObservation(visible.points + .1, visible.box, True)
+            for timestamp in (1.6, 1.7, 1.8, 1.9):
+                pipeline.process(self.frame(timestamp))
+            window = self.classifier.windows[-1]
+            for point in range(2, 6):
+                valid = np.isfinite(window[:, point]).all(axis=1)
+                self.assertTrue(valid.any())
+                expected = np.broadcast_to((visible.points + .1)[point], (valid.sum(), 2))
+                np.testing.assert_allclose(window[valid, point], expected)
+
+    def test_brief_tracking_or_anchor_failure_does_not_require_another_full_window(self):
+        with self.pipeline:
+            self.warm_up()
+            visible = self.detector.observation
+            missing = visible.points.copy()
+            missing[0] = np.nan
+            self.detector.observation = LandmarkObservation(missing, visible.box, True)
+            pipeline_result = self.pipeline.process(self.frame(.5))
+            self.assertEqual(pipeline_result.progress, 1)
+            self.detector.observation = LandmarkObservation(missing, None, False)
+            self.assertEqual(self.pipeline.process(self.frame(.6)).caption, "")
+            self.detector.observation = visible
+            result = self.pipeline.process(self.frame(.7))
+            self.assertEqual(result.progress, 1)
+            self.assertTrue(result.candidates)
+
+
+    def test_chest_position_is_forwarded_and_reset_with_the_person_context(self):
+        from dataclasses import replace
+
+        self.detector.observation = replace(self.detector.observation, caption_anchor=(.5, .55))
+        with self.pipeline:
+            self.assertEqual(self.warm_up().caption_anchor, (.5, .55))
+            self.detector.observation = replace(self.detector.observation, caption_anchor=(.55, .6))
+            self.assertEqual(self.pipeline.process(self.frame(.5)).caption_anchor, (.55, .6))
+            self.pipeline.reset()
+            self.detector.observation = replace(self.detector.observation, caption_anchor=None)
+            self.assertIsNone(self.pipeline.process(self.frame(0)).caption_anchor)
+
 
 class LandmarkDetectorTests(unittest.TestCase):
+    def test_chest_anchor_uses_visible_shoulders_and_image_dimensions(self):
+        pose = [SimpleNamespace(x=.5, y=.5, visibility=1) for _ in range(33)]
+        pose[11].x, pose[11].y = .3, .4
+        pose[12].x, pose[12].y = .7, .4
+        detected = SimpleNamespace(pose_landmarks=SimpleNamespace(landmark=pose))
+        anchor = LandmarkDetector._chest_anchor(detected, (600, 1000, 3))
+        np.testing.assert_allclose(anchor, (.5, .4 + 100 / 600))
+        for index in (11, 12):
+            pose[index].x += .1
+            pose[index].y += .1
+        np.testing.assert_allclose(LandmarkDetector._chest_anchor(detected, (600, 1000, 3)),
+                                   (anchor[0] + .1, anchor[1] + .1))
+        pose[11].visibility = .1
+        self.assertIsNone(LandmarkDetector._chest_anchor(detected, (600, 1000, 3)))
+        self.assertIsNone(LandmarkDetector._chest_anchor(SimpleNamespace(), (600, 1000, 3)))
+
     def test_selection_matches_training_order_and_original_bgr_is_never_mirrored(self):
         pose = [SimpleNamespace(x=index / 100, y=index / 100, visibility=1) for index in range(33)]
         detected = SimpleNamespace(

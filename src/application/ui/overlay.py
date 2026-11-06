@@ -66,11 +66,20 @@ class OverlayRenderer:
         status = "Pausado" if paused else (result.status if current else "Aguardando sinal")
         person = result.box if current else None
         show_prediction = False
+        show_caption = False
         if person is None:
             self._position = None
-            self._last_box = None
-            # Uma predição antiga não reaparece ao detectar outra pessoa.
-            self._prediction_cutoff = max(self._prediction_cutoff, now)
+            retained_caption = (
+                current and result.caption_timestamp is not None
+                and result.caption_expires_at is not None
+                and result.caption_timestamp <= now <= result.caption_expires_at
+            )
+            # Uma falha breve de tracking oculta o texto sem invalidar o TTL
+            # preservado pela análise. Mantém a caixa anterior para ainda
+            # detectar uma troca brusca de posição quando o tracking voltar.
+            if not retained_caption:
+                self._last_box = None
+                self._prediction_cutoff = max(self._prediction_cutoff, now)
         else:
             prediction_time = result.prediction_timestamp
             if prediction_time is None:
@@ -86,33 +95,52 @@ class OverlayRenderer:
                 fresh_prediction = fresh_prediction and prediction_time >= result.timestamp
             self._last_box = person
             show_prediction = fresh_prediction and not paused
-            # Só a hipótese líder já confirmada acompanha a pessoa. Os demais
-            # candidatos continuam no painel fixo, sem parecer uma legenda.
-            if (show_prediction and result.candidates
-                    and result.caption == result.candidates[0].label):
-                self._draw_caption(image, person, result.caption, scale)
-
+            # A legenda tem validade própria: uma confirmação pode continuar
+            # legível durante uma pausa, mesmo sem candidatos recentes.
+            if result.caption_timestamp is not None and result.caption_expires_at is not None:
+                show_caption = (
+                    not paused and bool(result.caption)
+                    and self._prediction_cutoff <= result.caption_timestamp <= now
+                    and now <= result.caption_expires_at
+                )
+            else:
+                # Mensagens antigas não traziam o relógio separado da legenda.
+                show_caption = (
+                    show_prediction and bool(result.candidates)
+                    and result.caption == result.candidates[0].label
+                )
         candidates = result.candidates[:3] if show_prediction else ()
         progress = result.progress if current and not paused else 0.0
         self._draw_candidates(image, candidates, status, progress, scale)
+        if show_caption:
+            self._draw_caption(
+                image, person, result.caption, scale,
+                is_partial=result.caption_is_partial, anchor=result.caption_anchor,
+            )
         self._draw_footer(image, device, capture_fps, analysis_fps, scale, paused,
                           result=result if current else None, now=now)
         return image
 
     def _draw_caption(
         self, image: np.ndarray, person: PersonBox, caption: str, scale: float,
+        is_partial: bool = False,
+        anchor: tuple[float, float] | None = None,
     ) -> None:
         height, width = image.shape[:2]
+        if is_partial:
+            caption += "…"
         font_size = max(12, round(24 * scale))
         padding = max(8, round(18 * scale))
         text_width = int(np.ceil(self._font(font_size).getlength(caption)))
         panel_width = min(width - 16, round(320 * scale), text_width + 2 * padding)
         panel_height = min(height - 16, max(32, round(52 * scale)))
         box = self._display_box(person)
-        x, y = self._panel_position(box, panel_width, panel_height, width, height)
+        if anchor is not None and self.mirror:
+            anchor = (1 - anchor[0], anchor[1])
+        x, y = self._panel_position(box, panel_width, panel_height, width, height, anchor)
         self._rounded_panel(image, (x, y, x + panel_width, y + panel_height), round(14 * scale))
         self._text(image, caption, x + padding, y + max(8, round(14 * scale)), font_size,
-                   self.WHITE, max_width=panel_width - 2 * padding)
+                   self.MUTED if is_partial else self.WHITE, max_width=panel_width - 2 * padding)
 
     @staticmethod
     def _candidate_bounds(width: int, height: int, scale: float) -> tuple[int, int, int, int]:
@@ -204,50 +232,21 @@ class OverlayRenderer:
 
     def _panel_position(
         self, box: PersonBox, panel_width: int, panel_height: int, width: int, height: int,
+        anchor: tuple[float, float] | None = None,
     ) -> tuple[int, int]:
-        """Prefere espaço livre ao lado da pessoa, preservando mãos e tronco."""
+        """Centraliza no peito; limita às bordas sem procurar outra posição."""
+        if anchor is None:
+            # Mensagens sem ombros válidos usam uma estimativa pelo tronco.
+            anchor = ((box.left + box.right) / 2, box.top + 0.35 * (box.bottom - box.top))
         scale = min(1.0, width / 850, height / 600)
-        margin, gap = max(8, round(18 * scale)), max(8, round(12 * scale))
-        x_min, x_max = margin, max(margin, width - margin - panel_width)
-        y_min = min(max(0, height - panel_height), margin)
-        y_max = max(y_min, height - margin - max(28, round(38 * scale)) - gap - panel_height)
-
-        person_left, person_right = box.left * width, box.right * width
-        person_top, person_bottom = box.top * height, box.bottom * height
-        target_x = (person_left + person_right - panel_width) / 2
-        target_y = (person_top + person_bottom - panel_height) / 2
-        left_x, right_x = person_left - gap - panel_width, person_right + gap
-        above_y, below_y = person_top - gap - panel_height, person_bottom + gap
-        left_fits, right_fits = left_x >= x_min, right_x <= x_max
-
-        if left_fits and (not right_fits or person_left > width - person_right):
-            target_x, x_max = left_x, left_x
-        elif right_fits:
-            target_x, x_min = right_x, right_x
-        elif above_y >= y_min:
-            target_y, y_max = above_y, above_y
-        elif below_y <= y_max:
-            target_y, y_min = below_y, below_y
-        else:
-            target_y = person_bottom - panel_height - gap
-
-        target = (float(np.clip(target_x, x_min, x_max)), float(np.clip(target_y, y_min, y_max)))
-        if self._position is None:
-            self._position = target
-        else:
-            self._position = tuple(previous + 0.3 * (current - previous)
-                                   for previous, current in zip(self._position, target))
-        # A suavização também respeita a área livre: não atravessa o corpo ao
-        # trocar de lado ou quando o sinalizador se aproxima da placa.
-        self._position = (float(np.clip(self._position[0], x_min, x_max)),
-                          float(np.clip(self._position[1], y_min, y_max)))
-        x = int(np.clip(round(self._position[0]), 0, max(0, width - panel_width)))
-        y = int(np.clip(round(self._position[1]), 0, max(0, height - panel_height)))
-        # A legenda móvel não invade o painel fixo do canto superior direito.
-        fixed_left, _, fixed_right, fixed_bottom = self._candidate_bounds(width, height, scale)
-        if x < fixed_right and x + panel_width > fixed_left and y < fixed_bottom + gap:
-            y = min(round(y_max), fixed_bottom + gap)
-            self._position = (self._position[0], float(y))
+        margin = max(8, round(18 * scale))
+        footer_height = max(28, round(38 * scale))
+        x_max = max(0, width - margin - panel_width)
+        y_max = max(0, height - margin - footer_height - 8 - panel_height)
+        x = int(np.clip(round(anchor[0] * width - panel_width / 2), min(margin, x_max), x_max))
+        y = int(np.clip(round(anchor[1] * height - panel_height / 2), min(margin, y_max), y_max))
+        # Sem interpolar a posição: a legenda acompanha a âncora atual do corpo.
+        self._position = (x, y)
         return x, y
 
     @staticmethod

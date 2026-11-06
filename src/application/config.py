@@ -17,11 +17,15 @@ class RuntimeConfig:
     fps: float = 30.0
     backend: int | None = None
     device: str = "auto"
-    window_seconds: float = 3.0
+    window_seconds: float = 6.0
+    min_window_seconds: float = 0.6
     sample_fps: float = 30.0
-    prediction_interval: float = 0.3
+    prediction_interval: float = 0.15
     confidence_threshold: float = 0.7
-    stability_count: int = 3
+    preview_confidence_threshold: float = 0.5
+    stability_count: int = 2
+    caption_hold_seconds: float = 2.0
+    hand_pause_seconds: float = 0.6
     max_frame_gap: float = 0.35
     person_timeout: float = 0.6
     cpu_threads: int = 2
@@ -39,13 +43,16 @@ class RuntimeConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} deve ser um inteiro positivo.")
-        for name in ("fps", "window_seconds", "sample_fps", "prediction_interval", "max_frame_gap", "person_timeout", "max_prediction_age"):
+        for name in ("fps", "window_seconds", "min_window_seconds", "sample_fps", "prediction_interval", "max_frame_gap", "person_timeout", "max_prediction_age", "caption_hold_seconds", "hand_pause_seconds"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} deve ser finito e positivo.")
         threshold = self.confidence_threshold
         if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not math.isfinite(threshold) or not 0 <= threshold <= 1:
             raise ValueError("confidence_threshold deve estar entre 0 e 1.")
+        preview = self.preview_confidence_threshold
+        if isinstance(preview, bool) or not isinstance(preview, (int, float)) or not math.isfinite(preview) or not 0 <= preview <= threshold:
+            raise ValueError("preview_confidence_threshold deve estar entre 0 e confidence_threshold.")
         if self.window_seconds * self.sample_fps < 3:
             raise ValueError("A janela deve conter pelo menos três frames.")
         if not isinstance(self.mirror, bool):

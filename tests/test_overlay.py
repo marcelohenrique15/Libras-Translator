@@ -83,6 +83,66 @@ class OverlayRendererTests(unittest.TestCase):
         texts = self._texts(renderer, self.result)
         self.assertFalse(any("LIBRAS" in text or "AO VIVO" in text for text in texts))
 
+    def test_confirmed_caption_survives_missing_or_changed_candidates_until_its_expiry(self):
+        renderer = OverlayRenderer()
+        held = replace(
+            self.result, timestamp=10.6, candidates=(), prediction_timestamp=9.0,
+            caption_timestamp=10.0, caption_expires_at=12.0,
+        )
+        self.assertIn("Acontecer", self._texts(renderer, held, now=10.7))
+        self.assertNotIn("80%", self._texts(renderer, held, now=10.7))
+        changed = replace(held, candidates=(Candidate("02", "Aluno", 0.9),), prediction_timestamp=10.6)
+        self.assertIn("Acontecer", self._texts(renderer, changed, now=10.7))
+        # Um resultado novo não prolonga o TTL da legenda anterior.
+        expired = replace(held, timestamp=12.1)
+        self.assertNotIn("Acontecer", self._texts(renderer, expired, now=12.1))
+
+    def test_partial_caption_is_visibly_revisable_and_stable_caption_has_no_ellipsis(self):
+        renderer = OverlayRenderer()
+        partial = replace(
+            self.result, caption="Aluno", caption_is_partial=True,
+            caption_timestamp=10.0, caption_expires_at=10.6,
+        )
+        with patch.object(renderer, "_text", wraps=renderer._text) as draw:
+            renderer.render(self.frame, partial, now=10.1)
+        label = next(call for call in draw.call_args_list if call.args[1] == "Aluno…")
+        self.assertEqual(label.args[5], renderer.MUTED)
+        stable = replace(partial, caption_is_partial=False)
+        texts = self._texts(renderer, stable)
+        self.assertIn("Aluno", texts)
+        self.assertNotIn("Aluno…", texts)
+
+    def test_clocked_caption_resumes_after_brief_tracking_loss_without_extending_its_ttl(self):
+        renderer = OverlayRenderer()
+        retained = replace(self.result, caption_timestamp=10.0, caption_expires_at=12.0)
+        self.assertIn("Acontecer", self._texts(renderer, retained))
+        missing = replace(retained, timestamp=10.2, box=None, caption="")
+        self.assertNotIn("Acontecer", self._texts(renderer, missing, now=10.2))
+        returned = replace(retained, timestamp=10.3, candidates=())
+        self.assertIn("Acontecer", self._texts(renderer, returned, now=10.3))
+        expired = replace(returned, timestamp=12.1)
+        self.assertNotIn("Acontecer", self._texts(renderer, expired, now=12.1))
+
+    def test_person_jump_after_brief_tracking_loss_still_hides_retained_caption(self):
+        renderer = OverlayRenderer()
+        retained = replace(self.result, caption_timestamp=10.0, caption_expires_at=12.0)
+        self._texts(renderer, retained)
+        missing = replace(retained, timestamp=10.2, box=None, caption="")
+        self._texts(renderer, missing, now=10.2)
+        moved = replace(retained, timestamp=10.3, box=PersonBox(0.75, 0.05, 0.95, 0.85))
+        self.assertNotIn("Acontecer", self._texts(renderer, moved, now=10.3))
+
+    def test_pause_hides_retained_caption_and_future_caption_is_not_displayed(self):
+        renderer = OverlayRenderer()
+        retained = replace(self.result, caption_timestamp=10.0, caption_expires_at=12.0)
+        with patch.object(renderer, "_draw_caption") as draw:
+            renderer.render(self.frame, retained, paused=True, now=10.1)
+            draw.assert_not_called()
+        future = replace(retained, caption_timestamp=10.5)
+        with patch.object(renderer, "_draw_caption") as draw:
+            renderer.render(self.frame, future, now=10.1)
+            draw.assert_not_called()
+
     def test_stale_or_missing_person_removes_old_caption(self):
         renderer = OverlayRenderer()
         self.assertIn("Acontecer", self._texts(renderer, self.result))
@@ -158,36 +218,26 @@ class OverlayRendererTests(unittest.TestCase):
                 self.assertLessEqual(x + panel_width, width)
                 self.assertLessEqual(y + panel_height, height)
 
-    def test_panel_uses_free_side_instead_of_covering_person(self):
-        renderer = OverlayRenderer()
-        width, height, panel_width, panel_height = 1280, 720, 346, 190
-        # Inclui movimento e troca de lado para verificar a suavização também.
-        for box in (PersonBox(0.05, 0.15, 0.4, 0.9), PersonBox(0.15, 0.15, 0.5, 0.9),
-                    PersonBox(0.6, 0.15, 0.95, 0.9)):
-            x, y = renderer._panel_position(box, panel_width, panel_height, width, height)
-            self.assertTrue(x + panel_width <= box.left * width or x >= box.right * width)
-            self.assertGreaterEqual(y, 75)
-            self.assertLessEqual(y + panel_height, 652)
+    def test_caption_tracks_chest_center_without_drifting_to_free_sides(self):
+        renderer = OverlayRenderer(mirror=False)
+        for anchor in ((.3, .5), (.4, .6), (.65, .5)):
+            x, y = renderer._panel_position(self.box, 200, 50, 1000, 600, anchor)
+            self.assertEqual((x + 100, y + 25), (round(anchor[0] * 1000), round(anchor[1] * 600)))
 
-    def test_panel_uses_above_or_below_if_sides_are_occupied(self):
-        renderer = OverlayRenderer()
-        width, height, panel_width, panel_height = 1280, 720, 346, 190
-        lower_person = PersonBox(0.05, 0.5, 0.95, 0.9)
-        _, y = renderer._panel_position(lower_person, panel_width, panel_height, width, height)
-        self.assertLessEqual(y + panel_height, lower_person.top * height)
-        higher_person = PersonBox(0.05, 0.1, 0.95, 0.4)
-        _, y = renderer._panel_position(higher_person, panel_width, panel_height, width, height)
-        self.assertGreaterEqual(y, higher_person.bottom * height)
+    def test_caption_anchor_respects_mirror_and_does_not_depend_on_arm_box(self):
+        anchor = (.3, .55)
+        for mirror, expected_x in ((False, .3), (True, .7)):
+            renderer = OverlayRenderer(mirror=mirror)
+            for box in (self.box, PersonBox(0, .05, 1, .85)):
+                result = replace(self.result, box=box, caption_anchor=anchor)
+                with patch.object(renderer, "_panel_position", wraps=renderer._panel_position) as position:
+                    renderer.render(self.frame, result, now=10.1)
+                np.testing.assert_allclose(position.call_args.args[-1], (expected_x, .55))
 
-    def test_caption_does_not_cover_fixed_candidates(self):
+    def test_caption_keeps_its_anchor_when_near_fixed_candidates(self):
         renderer = OverlayRenderer()
-        width, height = 1280, 720
-        panel_width, panel_height = 250, 52
-        fixed_left, fixed_top, fixed_right, fixed_bottom = renderer._candidate_bounds(width, height, 1.0)
-        for box in (PersonBox(0.5, 0.0, 0.65, 0.25), PersonBox(0.8, 0.0, 1.0, 0.3)):
-            x, y = renderer._panel_position(box, panel_width, panel_height, width, height)
-            self.assertTrue(x + panel_width <= fixed_left or x >= fixed_right
-                            or y + panel_height <= fixed_top or y >= fixed_bottom)
+        x, y = renderer._panel_position(self.box, 100, 50, 1000, 600, (.8, .2))
+        self.assertEqual((x + 50, y + 25), (800, 120))
 
     def test_tiny_frames_and_long_labels_do_not_fail(self):
         renderer = OverlayRenderer()

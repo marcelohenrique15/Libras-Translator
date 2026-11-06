@@ -66,6 +66,10 @@ class CheckpointClassifier:
         self._model.load_state_dict(checkpoint["model_state_dict"])
         self._model.to(self.device).eval().requires_grad_(False)
 
+    def warm_up(self) -> None:
+        """Inicializa kernels antes de começar a captura; não publica palavras."""
+        self.predict(np.zeros((3, self.processor.landmark_count, 2), dtype=np.float32))
+
     def predict(self, window: np.ndarray) -> tuple[Candidate, ...]:
         import torch
 

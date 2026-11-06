@@ -25,7 +25,20 @@ desenha três candidatos com confiança no canto superior direito e uma legenda
 com a palavra principal acompanhando a pessoa. A janela abre em 1280×720;
 `window_width` e `window_height` permitem ajustar esse tamanho na configuração.
 O espelhamento é somente visual. **ESC** encerra, **espaço** pausa/retoma a análise
-e **R** limpa o contexto. Para escolher os pesos explicitamente:
+e **R** limpa o contexto.
+
+A janela cresce a partir de 0,6 segundo e atualiza hipóteses a cada 0,15 segundo,
+até seis segundos de contexto. A palavra provisória aparece com reticências e
+pode mudar. Duas leituras concordantes no limiar ou acima só confirmam após contexto
+completo ou uma pausa de mãos de 0,6 segundo; uma confirmação recente pode ficar
+visível por dois segundos. A pausa é uma heurística, não segmentação linguística.
+Um sinal por vez continua sendo o protocolo. A avaliação deve observar cada sinal
+feito uma vez; erros e falta de confirmação não devem ser compensados por
+repetições no teste. Esses controles exigem avaliação em vídeo ao vivo,
+incluindo sinais únicos, repouso e transições. Inferência rápida sozinha não mede
+o tempo até a legenda.
+
+Para escolher os pesos explicitamente:
 
 ```bash
 libras-camera --checkpoint caminho/final.pt --camera 0 --device auto

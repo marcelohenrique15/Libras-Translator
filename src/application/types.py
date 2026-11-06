@@ -39,3 +39,7 @@ class AnalysisResult:
     inference_ms: float = 0.0
     analysis_ms: float = 0.0
     prediction_timestamp: float | None = None
+    caption_is_partial: bool = False
+    caption_timestamp: float | None = None
+    caption_expires_at: float | None = None
+    caption_anchor: tuple[float, float] | None = None

@@ -14,6 +14,7 @@ class LandmarkObservation:
     points: np.ndarray
     box: PersonBox | None
     hands_present: bool
+    caption_anchor: tuple[float, float] | None = None
 
 
 class LandmarkDetector:
@@ -51,7 +52,10 @@ class LandmarkDetector:
             getattr(detected, f"{side}_hand_landmarks", None) is not None
             for side in ("left", "right")
         )
-        return LandmarkObservation(coordinates, self._person_box(detected), hands_present)
+        return LandmarkObservation(
+            coordinates, self._person_box(detected), hands_present,
+            self._chest_anchor(detected, image.shape),
+        )
 
     def close(self) -> None:
         self._holistic.close()
@@ -59,6 +63,25 @@ class LandmarkDetector:
     def reset(self) -> None:
         """Esquece o rastreamento da pessoa anterior, mantendo os recursos abertos."""
         self._holistic.reset()
+
+    @staticmethod
+    def _chest_anchor(detected: object, image_shape: tuple) -> tuple[float, float] | None:
+        """Centro do peito: abaixo dos ombros, proporcional à largura do tronco."""
+        pose = getattr(detected, "pose_landmarks", None)
+        if pose is None or len(pose.landmark) <= 12:
+            return None
+        shoulders = [pose.landmark[11], pose.landmark[12]]
+        if any(getattr(point, "visibility", 1) < 0.4 for point in shoulders):
+            return None
+        points = np.array([(point.x, point.y) for point in shoulders])
+        if not np.isfinite(points).all():
+            return None
+        height, width = image_shape[:2]
+        shoulder_width = np.linalg.norm((points[1] - points[0]) * [width, height])
+        if shoulder_width < 1:
+            return None
+        center_x, center_y = points.mean(axis=0)
+        return float(center_x), float(center_y + 0.25 * shoulder_width / height)
 
     @staticmethod
     def _person_box(detected: object) -> PersonBox | None:

@@ -32,6 +32,10 @@ class SessionStats:
     predictions: int = 0
     duration_seconds: float = 0.0
     last_candidates: list[dict] = field(default_factory=list)
+    first_prediction_seconds: float | None = None
+    first_partial_caption_seconds: float | None = None
+    first_stable_caption_seconds: float | None = None
+    last_caption: str = ""
 
 
 class CameraApplication:
@@ -67,6 +71,7 @@ class CameraApplication:
         previous_prediction = None
         camera_started = False
         eof_since = None
+        first_capture_time = None
         try:
             self.display.open()
             self.analysis.start()
@@ -80,6 +85,8 @@ class CameraApplication:
                     last_capture = cycle_start
                 packet = self.camera.read_latest() if camera_started else None
                 if packet is not None:
+                    if first_capture_time is None:
+                        first_capture_time = packet.timestamp
                     frame = packet
                     last_capture = cycle_start
                     capture_rate.update(packet.timestamp)
@@ -92,7 +99,16 @@ class CameraApplication:
                     result = updated
                     stats.analyzed_frames += 1
                     analysis_rate.update(updated.timestamp)
+                    elapsed = max(0.0, time.monotonic() - first_capture_time) if first_capture_time is not None else 0.0
+                    if updated.caption:
+                        stats.last_caption = updated.caption
+                        if updated.caption_is_partial and stats.first_partial_caption_seconds is None:
+                            stats.first_partial_caption_seconds = elapsed
+                        elif not updated.caption_is_partial and stats.first_stable_caption_seconds is None:
+                            stats.first_stable_caption_seconds = elapsed
                     if updated.prediction_timestamp is not None and updated.prediction_timestamp != previous_prediction:
+                        if stats.first_prediction_seconds is None:
+                            stats.first_prediction_seconds = elapsed
                         previous_prediction = updated.prediction_timestamp
                         stats.predictions += 1
                         stats.last_candidates = [
