@@ -6,9 +6,11 @@ import time
 import numpy as np
 
 from application.capture.camera import CameraSource
+from application.capture.session import CaptureSession
 from application.config import RuntimeConfig
 from application.ui.display import HeadlessDisplay, OpenCVDisplay
 from application.ui.overlay import OverlayRenderer
+from application.ui.capture_overlay import CaptureRenderer
 from application.types import AnalysisResult, FramePacket
 from application.runtime.worker import AnalysisWorker
 
@@ -36,22 +38,29 @@ class SessionStats:
     first_partial_caption_seconds: float | None = None
     first_stable_caption_seconds: float | None = None
     last_caption: str = ""
+    capture_state: str = ""
+    capture_status: str = ""
+    capture_metrics: dict | None = None
+    max_ui_interval_ms: float = 0.0
 
 
 class CameraApplication:
     """Interfaces pequenas permitem testar o controlador sem câmera nem GPU."""
 
     def __init__(
-        self, config: RuntimeConfig, *, headless=False, max_seconds=None,
+        self, config: RuntimeConfig, *, headless=False, max_seconds=None, auto_capture=False,
         camera=None, analysis=None, renderer=None, display=None,
     ):
         self.config = config
         self.max_seconds = max_seconds
+        self.auto_capture = auto_capture
+        self.session = CaptureSession(config.capture_seconds) if config.mode == "manual" else None
         self.camera = camera if camera is not None else CameraSource(
             config.source, config.width, config.height, config.fps, config.backend,
         )
         self.analysis = analysis if analysis is not None else AnalysisWorker(config)
-        self.renderer = renderer if renderer is not None else OverlayRenderer(
+        renderer_class = CaptureRenderer if self.session is not None else OverlayRenderer
+        self.renderer = renderer if renderer is not None else renderer_class(
             config.mirror, config.max_prediction_age,
         )
         self.display = display if display is not None else (
@@ -72,11 +81,16 @@ class CameraApplication:
         camera_started = False
         eof_since = None
         first_capture_time = None
+        auto_capture_started = False
+        previous_cycle = None
         try:
             self.display.open()
             self.analysis.start()
             while True:
                 cycle_start = time.monotonic()
+                if previous_cycle is not None:
+                    stats.max_ui_interval_ms = max(stats.max_ui_interval_ms, (cycle_start - previous_cycle) * 1000)
+                previous_cycle = cycle_start
                 # Carregar o modelo antes da captura também preserva o início
                 # de um arquivo de vídeo usado para reprodução e verificação.
                 if self.analysis.ready and not camera_started:
@@ -84,6 +98,8 @@ class CameraApplication:
                     camera_started = True
                     last_capture = cycle_start
                 packet = self.camera.read_latest() if camera_started else None
+                if self.session is not None:
+                    self.session.scene(cycle_start)
                 if packet is not None:
                     if first_capture_time is None:
                         first_capture_time = packet.timestamp
@@ -91,14 +107,23 @@ class CameraApplication:
                     last_capture = cycle_start
                     capture_rate.update(packet.timestamp)
                     stats.captured_frames += 1
-                    if not paused:
+                    if self.auto_capture and not auto_capture_started and self.session is not None:
+                        self._begin_capture(packet.timestamp)
+                        auto_capture_started = True
+                    if not paused and (self.session is None or self.session.state == "recording"):
                         self.analysis.submit(packet)
+                if self.session is not None and self.session.state == "processing" and not self.session.finish_sent:
+                    self.session.finish_sent = self.analysis.finish_capture(frame, self.session.ended_at)
 
                 updated = self.analysis.read_latest()
                 if updated is not None and not paused:
                     result = updated
                     stats.analyzed_frames += 1
                     analysis_rate.update(updated.timestamp)
+                    if self.session is not None:
+                        self.session.accept(updated)
+                        if updated.capture_metrics is not None:
+                            stats.capture_metrics = updated.capture_metrics
                     elapsed = max(0.0, time.monotonic() - first_capture_time) if first_capture_time is not None else 0.0
                     if updated.caption:
                         stats.last_caption = updated.caption
@@ -124,6 +149,10 @@ class CameraApplication:
                     raise RuntimeError("A análise não iniciou em 30 segundos. Confira o checkpoint e o dispositivo.")
 
                 scene = result
+                if self.session is not None:
+                    scene = self.session.scene(cycle_start)
+                    if self.session.state == "processing" and cycle_start - self.session.ended_at > 30:
+                        raise RuntimeError("A classificação não respondeu em 30 segundos. Reinicie a aplicação.")
                 if not self.analysis.ready:
                     scene = AnalysisResult(frame.frame_id, cycle_start, None, status="Carregando modelo…")
                 image = self.renderer.render(
@@ -134,20 +163,36 @@ class CameraApplication:
                 key = self.display.poll_key()
                 if key in (27, ord("q")):
                     break
-                if key in (32, ord("r"), ord("R")):
+                if key in (ord("v"), ord("V")) and frame.frame_id >= 0 and camera_started and self.analysis.ready and self.session is not None:
+                    if self.session.state == "recording":
+                        self.session.stop(time.monotonic())
+                    else:
+                        self._begin_capture(time.monotonic())
+                if key in (ord("r"), ord("R")) or (key == 32 and self.session is None):
                     if key == 32:
                         paused = not paused
                     self.analysis.reset()
                     self.renderer.reset()
                     result = None
                     previous_prediction = None
+                    if self.session is not None:
+                        self.session.cancel()
                 if camera_started and self.camera.finished and packet is None:
                     eof_since = cycle_start if eof_since is None else eof_since
+                    if self.session is not None:
+                        if self.session.state == "recording":
+                            self.session.reject(cycle_start, "Vídeo terminou antes de completar a captura.")
+                            self.analysis.reset()
+                        if not self.session.busy:
+                            break
                     # Dá ao último resultado a chance de chegar; o prazo também
                     # cobre o descarte deliberado de um frame por fila cheia.
-                    if result is not None and result.frame_id >= frame.frame_id:
+                    if self.session is None and result is not None and result.frame_id >= frame.frame_id:
                         break
-                    if cycle_start - eof_since >= 1:
+                    if cycle_start - eof_since >= (10 if self.session is not None else 1):
+                        if self.session is not None and self.session.busy:
+                            self.session.reject(cycle_start, "Não houve resultado após o fim do vídeo.")
+                            self.analysis.reset()
                         break
                 if self.max_seconds is not None and time.monotonic() - started >= self.max_seconds:
                     break
@@ -162,4 +207,12 @@ class CameraApplication:
                 finally:
                     self.display.close()
             stats.duration_seconds = time.monotonic() - started
+            if self.session is not None:
+                stats.capture_state = self.session.state
+                stats.capture_status = self.session.scene(time.monotonic()).status
         return stats
+
+    def _begin_capture(self, timestamp: float) -> None:
+        if self.session.start(timestamp):
+            self.analysis.start_capture(timestamp)
+            self.renderer.reset()

@@ -3,6 +3,7 @@ import os
 import tempfile
 import time
 import unittest
+from queue import Queue
 from pathlib import Path
 from unittest.mock import patch
 
@@ -57,6 +58,25 @@ class GatedPipeline(FakePipeline):
                     raise RuntimeError("O teste não liberou a inferência em trânsito.")
                 time.sleep(0.01)
         return super().process(frame)
+
+
+class TriggeredPipeline(GatedPipeline):
+    def start_capture(self, timestamp):
+        self.reset()
+        self._record({"event": "capture", "timestamp": timestamp})
+
+    def finish_capture(self, frame):
+        return AnalysisResult(frame.frame_id, frame.timestamp, None, caption="Aluno", capture_state="completed")
+
+
+class FinalAfterProgressPipeline(FakePipeline):
+    def process(self, frame):
+        (self.directory / "progress_ready").touch()
+        return super().process(frame)
+
+    def finish_capture(self, frame):
+        (self.directory / "final_ready").touch()
+        return AnalysisResult(frame.frame_id, frame.timestamp, None, caption="Aluno", capture_state="completed")
 
 
 class FailingPipeline(FakePipeline):
@@ -195,6 +215,46 @@ class AnalysisWorkerTests(unittest.TestCase):
         self.assertIsNone(worker.error)
         worker.stop()
         worker.stop()
+
+    def test_finish_is_a_small_command_and_does_not_remove_a_queued_frame(self):
+        worker = AnalysisWorker(self.config, pipeline_factory=FakePipeline)
+        worker._inputs = Queue(maxsize=1)
+        worker.start_capture(100)
+        frame = FramePacket(1, 101, np.zeros((540, 960, 3), dtype=np.uint8))
+        self.assertTrue(worker.submit(frame))
+        self.assertFalse(worker.finish_capture(frame, 102))
+        self.assertIs(worker._inputs.get_nowait().frame, frame)
+        self.assertTrue(worker.finish_capture(frame, 102))
+        request = worker._inputs.get_nowait()
+        self.assertTrue(request.finish_capture)
+        self.assertEqual(request.frame.image.nbytes, 0)
+        self.assertEqual(request.frame.timestamp, 102)
+
+    def test_final_result_is_not_dropped_when_progress_queue_is_full(self):
+        worker = self._worker(FinalAfterProgressPipeline)
+        worker.submit(self._frame(4))
+        self._wait(lambda: (self.directory / "progress_ready").exists())
+        self.assertTrue(worker.finish_capture(self._frame(5)))
+        self._wait(lambda: (self.directory / "final_ready").exists())
+        self.assertEqual(self._wait(worker.read_latest).caption, "resets:1")
+        self.assertEqual(self._wait(worker.read_latest).caption, "Aluno")
+
+    def test_trigger_and_finish_follow_current_generation_across_process_boundary(self):
+        worker = self._worker(TriggeredPipeline)
+        worker.submit(self._frame(1))
+        self._wait(lambda: (self.directory / "processing").exists())
+        worker.start_capture(100)
+        (self.directory / "release").touch()
+        worker.submit(self._frame(2))
+        self._wait(lambda: any(event["event"] == "capture" for event in self._events()))
+        self.assertEqual([event["timestamp"] for event in self._events() if event["event"] == "capture"], [100])
+        self.assertTrue(worker.finish_capture(self._frame(3)))
+        def completed_result():
+            result = worker.read_latest()
+            return result if result is not None and result.capture_state == "completed" else None
+
+        result = self._wait(completed_result)
+        self.assertEqual(result.caption, "Aluno")
 
 
 if __name__ == "__main__":

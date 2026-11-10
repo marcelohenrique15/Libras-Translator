@@ -8,6 +8,8 @@ import tomllib
 
 @dataclass(frozen=True)
 class RuntimeConfig:
+    mode: str = "manual"
+    capture_seconds: float = 6.0
     checkpoint: Path | None = None
     source: int | str = 0
     width: int = 960
@@ -33,6 +35,8 @@ class RuntimeConfig:
     mirror: bool = True
 
     def __post_init__(self):
+        if self.mode not in {"manual", "continuous"}:
+            raise ValueError("mode deve ser manual ou continuous.")
         if self.checkpoint is not None:
             object.__setattr__(self, "checkpoint", Path(self.checkpoint))
         if isinstance(self.source, bool) or not isinstance(self.source, (int, str)) or self.source == "":
@@ -43,7 +47,7 @@ class RuntimeConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} deve ser um inteiro positivo.")
-        for name in ("fps", "window_seconds", "min_window_seconds", "sample_fps", "prediction_interval", "max_frame_gap", "person_timeout", "max_prediction_age", "caption_hold_seconds", "hand_pause_seconds"):
+        for name in ("fps", "capture_seconds", "window_seconds", "min_window_seconds", "sample_fps", "prediction_interval", "max_frame_gap", "person_timeout", "max_prediction_age", "caption_hold_seconds", "hand_pause_seconds"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} deve ser finito e positivo.")
@@ -51,8 +55,10 @@ class RuntimeConfig:
         if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not math.isfinite(threshold) or not 0 <= threshold <= 1:
             raise ValueError("confidence_threshold deve estar entre 0 e 1.")
         preview = self.preview_confidence_threshold
-        if isinstance(preview, bool) or not isinstance(preview, (int, float)) or not math.isfinite(preview) or not 0 <= preview <= threshold:
-            raise ValueError("preview_confidence_threshold deve estar entre 0 e confidence_threshold.")
+        if isinstance(preview, bool) or not isinstance(preview, (int, float)) or not math.isfinite(preview) or not 0 <= preview <= 1:
+            raise ValueError("preview_confidence_threshold deve estar entre 0 e 1.")
+        if self.mode == "continuous" and preview > threshold:
+            raise ValueError("No modo contínuo, preview_confidence_threshold não pode superar confidence_threshold.")
         if self.window_seconds * self.sample_fps < 3:
             raise ValueError("A janela deve conter pelo menos três frames.")
         if not isinstance(self.mirror, bool):
@@ -77,6 +83,8 @@ def resolve_checkpoint(config: RuntimeConfig, runs_dir: Path = Path("runs")) -> 
     """Prefere o modelo final da execução concluída mais recente, sem olhar suas métricas."""
     if config.checkpoint is not None:
         path = config.checkpoint
+        if path.is_dir():
+            path = path / "final.pt"
     else:
         results = [path for path in runs_dir.rglob("result.json") if (path.parent / "final.pt").is_file()]
         if not results:

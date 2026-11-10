@@ -16,6 +16,9 @@ def main():
     parser.add_argument("--camera", type=int, help="Índice da câmera, por exemplo 0 ou 1")
     parser.add_argument("--video", type=Path, help="Arquivo local para demonstração/reprodução")
     parser.add_argument("--device", help="auto, cpu ou cuda:0")
+    parser.add_argument("--mode", choices=("manual", "continuous"), help="manual: V captura um sinal; continuous: protótipo incremental")
+    parser.add_argument("--capture-seconds", type=float, help="Duração da captura manual; padrão: 6")
+    parser.add_argument("--auto-capture", action="store_true", help="Inicia uma captura automaticamente em --video, para verificação")
     parser.add_argument("--window-seconds", type=float)
     parser.add_argument("--confidence-threshold", type=float)
     parser.add_argument("--mirror", action=argparse.BooleanOptionalAction, default=None)
@@ -35,10 +38,17 @@ def main():
             checkpoint=args.checkpoint, source=source, device=args.device,
             window_seconds=args.window_seconds, confidence_threshold=args.confidence_threshold,
             mirror=args.mirror,
+            mode=args.mode, capture_seconds=args.capture_seconds,
         ))
+        if args.auto_capture and (args.video is None or config.mode != "manual"):
+            parser.error("--auto-capture exige --video e modo manual.")
+        if args.headless and config.mode == "manual" and not args.auto_capture:
+            parser.error("Modo manual sem janela exige --video e --auto-capture.")
         from application.runtime.app import CameraApplication
-        print(f"Modelo: {config.checkpoint}\nFonte: {config.source}\nESC sair · ESPAÇO pausar · R limpar", flush=True)
-        stats = CameraApplication(config, headless=args.headless, max_seconds=args.max_seconds).run()
+        controls = "V capturar · R cancelar/limpar · ESC sair" if config.mode == "manual" else "ESC sair · ESPAÇO pausar · R limpar"
+        print(f"Modelo: {config.checkpoint}\nFonte: {config.source}\n{controls}", flush=True)
+        stats = CameraApplication(config, headless=args.headless, max_seconds=args.max_seconds,
+                                  auto_capture=args.auto_capture).run()
         print(json.dumps(asdict(stats), ensure_ascii=False, indent=2))
     except (OSError, ValueError, RuntimeError) as error:
         parser.exit(1, f"Erro: {error}\n")

@@ -1,11 +1,13 @@
 """Um proprietário do modelo e do rastreador, isolado da interface."""
 
 import multiprocessing as mp
-from queue import Empty
+from queue import Empty, Full
+
+import numpy as np
 
 from application.runtime.channels import put_latest, receive_latest
 from application.config import RuntimeConfig
-from application.types import AnalysisResult, FramePacket
+from application.types import AnalysisRequest, AnalysisResult, FramePacket
 
 
 def _analyze(config, inputs, outputs, stopped, ready, finished, error_text, device_text, factory):
@@ -13,23 +15,41 @@ def _analyze(config, inputs, outputs, stopped, ready, finished, error_text, devi
     try:
         # Importação tardia: o processo da câmera e a janela não carregam PyTorch.
         if factory is None:
-            from application.recognition.pipeline import RecognitionPipeline
-            factory = RecognitionPipeline
+            if config.mode == "manual":
+                from application.recognition.clip_pipeline import ClipRecognitionPipeline
+                factory = ClipRecognitionPipeline
+            else:
+                from application.recognition.pipeline import RecognitionPipeline
+                factory = RecognitionPipeline
         with factory(config) as pipeline:
             device_text.value = pipeline.device[:31]
             ready.set()
             current_generation = None
             while not stopped.is_set():
                 try:
-                    generation, frame = inputs.get(timeout=0.1)
+                    request = inputs.get(timeout=0.1)
                 except Empty:
                     continue
+                generation, frame = request.generation, request.frame
                 if generation != current_generation:
-                    pipeline.reset()
+                    if request.capture_started_at is not None:
+                        pipeline.start_capture(request.capture_started_at)
+                    else:
+                        pipeline.reset()
                     current_generation = generation
                 frame.image.setflags(write=False)
-                result = pipeline.process(frame)
-                put_latest(outputs, (generation, result))
+                result = pipeline.finish_capture(frame) if request.finish_capture else pipeline.process(frame)
+                if result.capture_state in {"completed", "rejected"}:
+                    # Um resultado final não pode ser perdido na corrida do
+                    # feeder com uma atualização de progresso ainda pendente.
+                    while not stopped.is_set():
+                        try:
+                            outputs.put((generation, result), timeout=.1)
+                            break
+                        except Full:
+                            continue
+                else:
+                    put_latest(outputs, (generation, result))
     except Exception as error:
         error_text.value = (str(error) or type(error).__name__)[:2047]
     finally:
@@ -48,6 +68,7 @@ class AnalysisWorker:
         self._process = None
         self._stopped = False
         self._generation = 0
+        self._capture_started_at = None
         self._inputs = None
         self._outputs = None
 
@@ -77,7 +98,27 @@ class AnalysisWorker:
     def submit(self, frame: FramePacket) -> bool:
         if self._inputs is None or self._stopped:
             return False
-        return put_latest(self._inputs, (self._generation, frame))
+        return put_latest(self._inputs, AnalysisRequest(self._generation, frame, self._capture_started_at))
+
+    def start_capture(self, timestamp: float):
+        """A ordem acompanha todos os frames até ser recebida, sem fila extra."""
+        self.reset()
+        self._capture_started_at = timestamp
+
+    def finish_capture(self, frame: FramePacket, ended_at: float | None = None) -> bool:
+        if self._inputs is None or self._stopped:
+            return False
+        # Finalizar exige somente ID e instante. Não copia outra imagem nem
+        # remove o último frame da fila; o controlador tenta depois se ela lotou.
+        marker = FramePacket(frame.frame_id, frame.timestamp if ended_at is None else ended_at,
+                             np.empty((0, 0, 3), dtype=np.uint8))
+        try:
+            self._inputs.put_nowait(AnalysisRequest(
+                self._generation, marker, self._capture_started_at, finish_capture=True,
+            ))
+            return True
+        except Full:
+            return False
 
     def read_latest(self) -> AnalysisResult | None:
         if self._outputs is None or self._stopped:
@@ -92,6 +133,7 @@ class AnalysisWorker:
         # O número acompanha entrada e saída. Uma inferência iniciada antes de
         # pausar/limpar pode terminar, mas sua resposta nunca volta para a tela.
         self._generation += 1
+        self._capture_started_at = None
 
     @property
     def ready(self):

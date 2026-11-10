@@ -20,39 +20,31 @@ Na raiz do projeto, com o ambiente ativado:
 libras-camera --config configs/application.toml
 ```
 
-A aplicação usa o modelo final da execução concluída mais recente em `runs/`,
-desenha três candidatos com confiança no canto superior direito e uma legenda
-com a palavra principal acompanhando a pessoa. A janela abre em 1280×720;
-`window_width` e `window_height` permitem ajustar esse tamanho na configuração.
-O espelhamento é somente visual. **ESC** encerra, **espaço** pausa/retoma a análise
-e **R** limpa o contexto.
+O modo padrão da demonstração é **manual**. Aguarde o carregamento e pressione
+**V** para iniciar uma captura de até **6 segundos**. Pressione **V novamente**
+assim que terminar o sinal para classificar o trecho mais cedo. Faça um sinal uma vez; ao final,
+o modelo classifica o trecho e mostra a palavra em uma **legenda abaixo da câmera**.
+A contagem e a barra indicam o progresso. O resultado fica na tela até a próxima
+captura. **R** cancela/limpa; **ESC/Q** encerra. Durante o processamento, V é ignorado.
 
-A janela cresce a partir de 0,6 segundo e atualiza hipóteses a cada 0,15 segundo,
-até seis segundos de contexto. A palavra provisória aparece com reticências e
-pode mudar. Duas leituras concordantes no limiar ou acima só confirmam após contexto
-completo ou uma pausa de mãos de 0,6 segundo; uma confirmação recente pode ficar
-visível por dois segundos. A pausa é uma heurística, não segmentação linguística.
-Um sinal por vez continua sendo o protocolo. A avaliação deve observar cada sinal
-feito uma vez; erros e falta de confirmação não devem ser compensados por
-repetições no teste. Esses controles exigem avaliação em vídeo ao vivo,
-incluindo sinais únicos, repouso e transições. Inferência rápida sozinha não mede
-o tempo até a legenda.
+A configuração fixa o checkpoint do experimento em
+`runs/minds_libras/search_df534cae53ec/final/test_05/e06d86e0c687/final.pt`.
+Também é possível informar a pasta com `--checkpoint`. O modelo não é treinado
+novamente; a interface usa seus pesos e seu encoder. Entradas incompletas são
+recusadas, e confiança baixa aparece como **Possível: palavra**, sem confirmar a
+hipótese como acerto. A classificação
+continua limitada ao vocabulário de 20 sinais isolados.
 
-Para escolher os pesos explicitamente:
-
-```bash
-libras-camera --checkpoint caminho/final.pt --camera 0 --device auto
-```
-
-Sem reinstalar o projeto após adicionar o novo comando, use:
+A câmera acompanha o tamanho da janela; o espelhamento é somente visual. O antigo
+protótipo incremental é opcional com `--mode continuous`. Sem atualizar o comando
+instalado após mudar o código, use:
 
 ```bash
 PYTHONPATH=src python -m application --config configs/application.toml
 ```
 
-Veja o [guia da aplicação](docs/APPLICATION.md) para arquitetura, configuração,
-reprodução de vídeo, concorrência e limitações. O modelo reconhece sinais isolados;
-a legenda ao vivo ainda não realiza tradução de frases ou segmentação linguística.
+Veja o [guia da aplicação](docs/APPLICATION.md) para controles, arquitetura, testes,
+reprodução de arquivos e limites da demonstração.
 
 ## Treino
 

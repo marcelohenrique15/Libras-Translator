@@ -13,6 +13,14 @@ class FramePacket:
 
 
 @dataclass(frozen=True)
+class AnalysisRequest:
+    generation: int
+    frame: FramePacket
+    capture_started_at: float | None = None
+    finish_capture: bool = False
+
+
+@dataclass(frozen=True)
 class Candidate:
     class_id: str
     label: str
@@ -43,3 +51,5 @@ class AnalysisResult:
     caption_timestamp: float | None = None
     caption_expires_at: float | None = None
     caption_anchor: tuple[float, float] | None = None
+    capture_state: str = ""
+    capture_metrics: dict | None = None

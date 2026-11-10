@@ -125,6 +125,45 @@ class FakeRenderer:
         self.reset_count += 1
 
 
+class FakeManualAnalysis(FakeAnalysis):
+    def __init__(self, events):
+        super().__init__(events)
+        self.capture_times = []
+        self.finishes = 0
+        self.finish_times = []
+
+    def start_capture(self, timestamp):
+        self.reset()
+        self.capture_times.append(timestamp)
+
+    def submit(self, packet):
+        self.submitted.append(packet.frame_id)
+        self.pending = AnalysisResult(packet.frame_id, packet.timestamp, None, capture_state="recording")
+
+    def finish_capture(self, packet, ended_at=None):
+        self.finishes += 1
+        self.finish_times.append(ended_at)
+        self.pending = AnalysisResult(packet.frame_id, packet.timestamp, None,
+                                      (Candidate("02", "Aluno", .95),), caption="Aluno",
+                                      prediction_timestamp=packet.timestamp, capture_state="completed")
+        return True
+
+
+class SlowManualAnalysis(FakeManualAnalysis):
+    def finish_capture(self, packet, ended_at=None):
+        super().finish_capture(packet, ended_at)
+        self.final_result, self.pending = self.pending, None
+        self.remaining_reads = 3
+        return True
+
+    def read_latest(self):
+        if getattr(self, "remaining_reads", 0):
+            self.remaining_reads -= 1
+            if self.remaining_reads == 0:
+                self.pending = self.final_result
+        return super().read_latest()
+
+
 class FakeDisplay:
     def __init__(self, events, keys):
         self.events = events
@@ -161,7 +200,7 @@ class CameraApplicationTests(unittest.TestCase):
     def run_application(self, keys=(27,)):
         self.display = FakeDisplay(self.events, keys)
         application = CameraApplication(
-            RuntimeConfig(width=32, height=24), camera=self.camera,
+            RuntimeConfig(mode="continuous", width=32, height=24), camera=self.camera,
             analysis=self.analysis, renderer=self.renderer, display=self.display,
         )
         with patch("application.runtime.app.time.monotonic", side_effect=self.clock.monotonic), patch(
@@ -247,6 +286,48 @@ class CameraApplicationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "fechar análise"):
             self.run_application()
         self.assert_resources_closed()
+
+    def test_v_stops_capture_early_and_processing_ignores_additional_v(self):
+        self.analysis = SlowManualAnalysis(self.events)
+        display = FakeDisplay(self.events, (ord("v"), -1, -1, ord("v"), ord("v"), -1, -1, 27))
+        app = CameraApplication(RuntimeConfig(mode="manual", capture_seconds=6, width=32, height=24),
+                                camera=self.camera, analysis=self.analysis, renderer=self.renderer, display=display)
+        with patch("application.runtime.app.time.monotonic", side_effect=self.clock.monotonic), patch(
+            "application.runtime.app.time.sleep", side_effect=self.clock.sleep,
+        ):
+            stats = app.run()
+        self.assertEqual(len(self.analysis.capture_times), 1)
+        self.assertNotIn(0, self.analysis.submitted)  # primeiro frame precede a tecla V
+        self.assertEqual(self.analysis.finishes, 1)
+        self.assertLess(self.analysis.finish_times[0] - self.analysis.capture_times[0], 6)
+        self.assertEqual(stats.predictions, 1)
+        self.assertEqual(stats.capture_state, "completed")
+        self.assertEqual(self.renderer.calls[-1][1].caption, "Aluno")
+
+    def test_manual_mode_without_v_never_submits_to_model(self):
+        self.analysis = FakeManualAnalysis(self.events)
+        display = FakeDisplay(self.events, (-1, -1, 27))
+        app = CameraApplication(RuntimeConfig(mode="manual", width=32, height=24), camera=self.camera,
+                                analysis=self.analysis, renderer=self.renderer, display=display)
+        with patch("application.runtime.app.time.monotonic", side_effect=self.clock.monotonic), patch(
+            "application.runtime.app.time.sleep", side_effect=self.clock.sleep,
+        ):
+            app.run()
+        self.assertFalse(self.analysis.submitted)
+        self.assertFalse(self.analysis.capture_times)
+
+    def test_r_cancels_manual_capture_before_classification(self):
+        self.analysis = FakeManualAnalysis(self.events)
+        display = FakeDisplay(self.events, (ord("v"), -1, ord("r"), -1, 27))
+        app = CameraApplication(RuntimeConfig(mode="manual", width=32, height=24), camera=self.camera,
+                                analysis=self.analysis, renderer=self.renderer, display=display)
+        with patch("application.runtime.app.time.monotonic", side_effect=self.clock.monotonic), patch(
+            "application.runtime.app.time.sleep", side_effect=self.clock.sleep,
+        ):
+            stats = app.run()
+        self.assertEqual(self.analysis.finishes, 0)
+        self.assertEqual(stats.capture_state, "idle")
+        self.assertFalse(self.renderer.calls[-1][1].caption)
 
 
 if __name__ == "__main__":

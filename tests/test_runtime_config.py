@@ -54,6 +54,11 @@ class RuntimeConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(FileNotFoundError, "Nenhum modelo final"):
             resolve_checkpoint(RuntimeConfig(), self.root)
 
+    def test_explicit_checkpoint_folder_resolves_final_weights(self):
+        (self.root / "final.pt").touch()
+        config = resolve_checkpoint(RuntimeConfig(checkpoint=self.root))
+        self.assertEqual(config.checkpoint, (self.root / "final.pt").resolve())
+
     def test_live_preparation_matches_saved_training_pipeline_without_mutating_input(self):
         for imputation in (False, True):
             with self.subTest(imputation=imputation):
