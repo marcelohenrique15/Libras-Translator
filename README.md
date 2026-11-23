@@ -1,0 +1,303 @@
+# Libras Translator
+
+Pesquisa para reconhecimento de sinais isolados de Libras, com modelos e processamento configuráveis.
+
+## Instalação
+
+Com Python 3.12, na raiz do repositório:
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+```
+
+## Aplicação com câmera
+
+Na raiz do projeto, com o ambiente ativado:
+
+```bash
+libras-camera --config configs/application.toml
+```
+
+O modo padrão da demonstração é **manual**. Aguarde o carregamento e pressione
+**V** para iniciar uma captura de até **6 segundos**. Pressione **V novamente**
+assim que terminar o sinal para classificar o trecho mais cedo. Faça um sinal uma vez; ao final,
+o modelo classifica o trecho e mostra a palavra em uma **legenda abaixo da câmera**.
+A contagem e a barra indicam o progresso. O resultado fica na tela até a próxima
+captura. **R** cancela/limpa; **ESC/Q** encerra. Durante o processamento, V é ignorado.
+
+A configuração fixa o checkpoint do experimento em
+`runs/minds_libras/search_df534cae53ec/final/test_05/e06d86e0c687/final.pt`.
+Também é possível informar a pasta com `--checkpoint`. O modelo não é treinado
+novamente; a interface usa seus pesos e seu encoder. Entradas incompletas são
+recusadas, e confiança baixa aparece como **Possível: palavra**, sem confirmar a
+hipótese como acerto. A classificação
+continua limitada ao vocabulário de 20 sinais isolados.
+
+A câmera acompanha o tamanho da janela; o espelhamento é somente visual. O antigo
+protótipo incremental é opcional com `--mode continuous`. Sem atualizar o comando
+instalado após mudar o código, use:
+
+```bash
+PYTHONPATH=src python -m application --config configs/application.toml
+```
+
+Veja o [guia da aplicação](docs/APPLICATION.md) para controles, arquitetura, testes,
+reprodução de arquivos e limites da demonstração.
+
+## Treino
+
+```bash
+libras-translator --train --config configs/resnet18.toml
+libras-translator --list-models
+```
+
+O preset ResNet18 já inclui a busca Optuna de `configs/search.toml` e reserva o sinalizador **05** para teste. O protocolo é:
+
+1. Preparar manifesto, landmarks, seleção, interpolação, ancoragem e codificação, reutilizando caches atuais.
+2. Buscar hiperparâmetros somente nos sinalizadores disponíveis para treinamento. Cada tentativa alterna a pessoa de validação; o teste externo permanece reservado.
+3. Escolher a configuração com maior **F1 macro médio de validação**.
+4. Reservar uma pessoa para validação final e inicializar **um modelo novo**. Treinar com as demais pessoas, excluindo também a do teste, com early stopping pelo F1 de validação.
+5. Recuperar os pesos da melhor época desse treino, avaliar uma vez no teste reservado e gerar métricas, tabelas e gráficos.
+
+Com os 12 sinalizadores atuais e 200 tentativas no espaço de busca para cluster, são **2.200 treinamentos internos e um treinamento final** para o teste 05. Por padrão, o final reserva o sinalizador 01 para validação, usa os outros dez no treino e mantém o 05 no teste. A escolha automática usa a maior cobertura de classes entre as pessoas fora do teste, com desempate pelo ID; ela não consulta pontuações. `--final-validation-signer-id` permite uma escolha explícita, sem alterar as divisões internas do Optuna. Se apenas `--validation-signer-id` for informado, ele também será usado na validação final. Não se escolhem configurações, épocas ou checkpoints pelo resultado do teste.
+
+`--dataset` aceita uma pasta em `data/` ou um caminho. A forma `--train data/minds_libras` também funciona. Argumentos CLI substituem o TOML ou JSON carregado; opções específicas ficam em `model_options` e `processor_options`.
+
+O experimento usa processamento determinístico, **sem data augmentation**, em treino, validação e teste. `augmentation=true` é rejeitado. O preset procura reduzir overfitting com congelamento de camadas, dropout, AdamW, penalidades L1/L2 e label smoothing; essas técnicas não garantem ganho de generalização.
+
+| Opções | Uso |
+|---|---|
+| `--epochs`, `--patience` | Teto e espera nas validações internas; padrões: 1.000 e 20, fora da busca Optuna |
+| `--final-epochs` | Teto opcional do treino final, que mantém validação e early stopping |
+| `--batch-size`, `--learning-rate`, `--weight-decay` | Treino; weight decay desacoplado do AdamW |
+| `--l1-lambda`, `--l2-lambda`, `--label-smoothing`, `--gradient-clip` | Penalidades explícitas, suavização de rótulos e clipping |
+| `--test-signer-id ID\|all`, `--validation-signer-id ID` | Divisão por sinalizador |
+| `--subset asl_2nd\|all\|arcanjo`, `--frame-count` | Pontos e tamanho das sequências |
+| `--anchor shoulders\|nose\|none` | Referência fixa por vídeo; padrão: centro dos ombros |
+| `--imputation` / `--no-imputation` | Processamento |
+| `--processor NOME` | Processor registrado ou `pacote.modulo:Classe` |
+| `--device auto\|cpu\|cuda:N`, `--num-workers`, `--seed` | Execução |
+| `--output-dir`, `--weights-dir` | Resultados e pesos compartilhados |
+| `--search-config`, `--search-trials` | Espaço de busca Optuna e total de tentativas concluídas |
+| `--resume-search` | Localizar e retomar a busca mais recente, inclusive em `fresh_<id>`, até treino final e teste |
+| `--reuse-search`, `--force-restart` | Importar uma busca salva ou iniciar treinos em um diretório novo |
+
+Sem escolher o teste, usa o sinalizador marcado no manifesto ou o primeiro ID disponível. Cada outro sinalizador é usado para validação. `--validation-signer-id` restringe a uma rodada. Para LOPO completo:
+
+```bash
+libras-translator --train --config configs/resnet18.toml --test-signer-id all
+```
+
+Cada teste externo tem um estudo próprio. Com 12 sinalizadores e 200 tentativas por estudo, o LOPO completo custa **26.400 treinamentos internos + 12 finais = 26.412 treinamentos**. `--validation-signer-id` reduz a seleção a uma única pessoa de validação; o modelo final preserva suas pessoas de validação e teste.
+
+## Preparação por etapa
+
+```bash
+libras-translator --build-manifest --dataset minds_libras
+libras-translator --split-manifest --dataset minds_libras --test-signer-id 05
+libras-translator --extract-landmarks --dataset minds_libras
+libras-translator --select-landmarks --config configs/resnet18.toml
+libras-translator --impute-landmarks --config configs/resnet18.toml
+libras-translator --encode-landmarks --config configs/resnet18.toml
+```
+
+`--build-manifest` recria o CSV; `--split-manifest` atualiza `set`, preservando as outras colunas. Etapas processadas usam cache por código e configuração. Arquivos incompletos são refeitos. Veja o [formato dos dados](data/README.md).
+
+### Coordenadas relativas e codificação
+
+O processor de landmarks usa `anchor = "shoulders"` por padrão. Após a interpolação opcional, calcula o ponto médio dos ombros em cada frame válido e usa a mediana desses centros como referência fixa do vídeo. Subtrai essa referência de todos os pontos, incluindo mãos e rosto, preservando os valores ausentes. Isso remove a posição média no enquadramento e mantém as trajetórias; não corrige escala ou rotação nem acompanha deslocamentos da pessoa durante o vídeo.
+
+Escolha a referência em `processor_options`:
+
+```toml
+[processor_options]
+anchor = "shoulders" # Centro dos ombros; padrão
+# anchor = "nose"   # Mediana da posição do nariz
+# anchor = "none"   # Coordenadas originais; processamento legado
+```
+
+Na representação de imagem, as coordenadas relativas usam o intervalo fixo `[-1, 1]`, com corte dos valores fora dele. Valores válidos viram intensidades de 1 a 255: a coordenada relativa zero vira 128, cinza médio. Ausências viram 0, preto. O encoder mantém três frames consecutivos nos canais RGB e redimensiona a imagem para 224 × 224; esse redimensionamento mistura cores vizinhas e não fornece uma máscara explícita de ausência. Na representação de sequência, as coordenadas continuam relativas e as ausências são preenchidas com zero antes da reamostragem temporal.
+
+A ancoragem exige **novo treinamento**. Os CSVs da extração continuam aproveitáveis; os caches das etapas seguintes têm identificação por código e opções, preservando os arquivos antigos. Para reproduzir o processamento de um modelo anterior, use explicitamente `anchor = "none"`.
+
+`prepare(sample_id)` retorna os pontos interpolados e ancorados, ainda com `NaN` nas ausências; `encode(prepared)` transforma esses pontos na entrada do modelo. `process(sample_id)` executa os dois passos e reutiliza o cache. Se não houver nenhum frame com uma referência completa, a preparação informa o erro e o ID da amostra.
+
+## Busca de hiperparâmetros
+
+```bash
+libras-translator --train --config configs/resnet18.toml --search-trials 10
+```
+
+O Optuna usa TPE e maximiza a média do F1 macro nas validações internas. O espaço padrão busca taxa de aprendizado, batch, weight decay do AdamW, L1, L2, label smoothing, clipping de gradiente, largura e quantidade de camadas do classificador, dropout e quais camadas da ResNet podem aprender. `epochs` e `patience` ficam fora do espaço de busca e são iguais para todas as tentativas do estudo.
+
+Cada treino interno tem teto padrão de **1.000 épocas** e espera **20 épocas consecutivas sem um novo melhor F1 macro de validação**. Um F1 estritamente maior salva `best.pt` e zera o contador. Quedas, empates e recuperações que ainda não superam o melhor F1 contam como épocas sem melhora. Por exemplo, se o melhor resultado ocorreu na época 40 e não for superado, o treino termina após a época 60. As 1.000 épocas são um limite, não uma duração obrigatória; `--epochs` e `--patience` podem alterar esses limites fora da busca.
+
+O espaço para cluster usa 200 tentativas, com 30 iniciais aleatórias. Explora cabeças de 1–4 camadas e 32–1.024 unidades, dropout de 0–0,7 e três opções de camadas treináveis: `fc`, `layer4,fc` e `layer3,layer4,fc`. O comando acima, limitado a 10 tentativas, serve para uma verificação curta e fica inteiramente na fase aleatória. A busca continua sequencial, mesmo no cluster.
+
+O console mostra o protocolo por sinalizador, o orçamento e espaço da busca, a configuração completa antes de cada tentativa (inclusive ao retomar) e a configuração vencedora. Cada época informa a espera acumulada; ao terminar, o log distingue early stopping do teto de épocas. O treino final também monitora o F1 de validação: aguarda 20 épocas consecutivas sem superar o recorde, até o teto padrão de 1.000 épocas, e recupera os pesos de `best.pt`. `final.pt` guarda esses mesmos pesos; `last.pt` mantém o estado da última época executada para retomada. A duração final não deriva mais da mediana das divisões da busca. `--final-epochs` passa a ser apenas um teto opcional do treino final, mantendo validação e early stopping.
+
+Repetir o mesmo comando reutiliza o estudo, as divisões concluídas, o treinamento final e o teste quando ainda correspondem ao código, aos dados e à configuração. Treinos interrompidos retomam a partir de `last.pt`; uma época incompleta é repetida. O orçamento representa o total de tentativas **concluídas**, não novas tentativas a cada execução. Para ampliar a busca para trezentas no total:
+
+```bash
+libras-translator --train --config configs/resnet18.toml \
+  --search-trials 300
+```
+
+Para retomar automaticamente a busca mais recente após uma interrupção:
+
+```bash
+libras-translator --train --resume-search \
+  --dataset data/minds_libras --output-dir runs
+```
+
+O comando escolhe o banco `optuna.sqlite3` modificado mais recentemente nas buscas desse dataset, incluindo as pastas `fresh_<id>`. Restaura a configuração salva, informa o melhor F1 já encontrado e continua as tentativas pendentes no mesmo diretório. Ao concluir a busca, segue para o treino final, teste e gráficos. `--search-trials 300` pode ampliar o total; os demais controles da busca devem continuar compatíveis com os originais. A retomada confere código, dados, divisões, espaço de busca e versão do Optuna antes de iniciar o treino. Não é combinada com `--force-restart` ou `--reuse-search`.
+
+Para executar uma nova busca e novos treinos sem apagar resultados anteriores:
+
+```bash
+libras-translator --train --config configs/resnet18.toml --force-restart
+```
+
+`--force-restart` cria um diretório `fresh_<id>` e preserva os caches de pré-processamento. Quando `pretrained=true`, a inicialização nova usa pesos ImageNet e um classificador novo; não reaproveita pesos aprendidos nas divisões da busca.
+
+Para aproveitar apenas os parâmetros vencedores de uma busca salva e fazer um novo treinamento final:
+
+```bash
+libras-translator --train --config configs/resnet18.toml \
+  --reuse-search runs/minds_libras/search_1cf0ec14bae0 --force-restart
+```
+
+Ao importar uma busca cujo teto de épocas ou patience difere da configuração atual, o pipeline reavalia a configuração vencedora nas validações internas com os limites atuais, sem iniciar outra busca Optuna. A época do modelo final é escolhida pela validação do próprio treino final. A origem e as diferenças ficam registradas em `protocol_changes`; o F1 histórico descreve o protocolo de origem e **não valida o protocolo atual**.
+
+Buscas legadas também podem ter diferenças de augmentation, otimizador, regularização e código. A importação registra essas diferenças. A reavaliação do vencedor verifica essa configuração no protocolo atual; uma nova busca é necessária para comparar outras configurações sob esse protocolo.
+
+Também é possível importar hiperparâmetros de uma busca anterior à ancoragem. Nesse caso, o treino final usa a referência da configuração atual, e o resultado registra a mudança de processamento; o F1 da busca de origem não valida o modelo ancorado.
+
+O arquivo `best_config_test<ID>.json` desativa a busca e registra o teto do treino final e sua pessoa de validação. Carregá-lo executa diretamente esse treino com validação e depois o teste; use `--force-restart` para treinar um novo modelo mesmo se essa execução já existir. Em arquivos antigos, `epochs` e `final_epochs` podem conter uma duração curta calculada pela mediana; use `--epochs 1000 --final-epochs 1000` para substituir esses limites:
+
+```bash
+libras-translator --train --config caminho/best_config_test05.json --force-restart
+```
+
+Defina opções e intervalos no [arquivo de busca](configs/search.toml). O [guia de extensão](docs/EXTENDING.md#configuração-e-busca) explica como aplicá-los a outras arquiteturas e processors.
+
+## Resultados
+
+O console informa o caminho de `summary.json`. Cada teste externo produz um diretório `final/test_<ID>/val_<ID>/<execução>/` com:
+
+| Arquivo | Conteúdo |
+|---|---|
+| `best.pt`, `final.pt`, `last.pt` | Melhor checkpoint de validação, modelo final com esses mesmos pesos e estado da última época |
+| `config.json`, `training.json`, `validation.json`, `result.json`, `test.json` | Configuração, melhor época, parada, divisão de treino/validação/teste, origem da busca e métricas |
+| `history.json` | Métricas de treino e validação em cada época do treinamento final |
+| `predictions.csv`, `per_class.csv` | Previsões com confiança softmax e métricas por classe |
+| `performance.json`, `performance_samples.csv` | Ambiente da medição, latências e tempos por amostra do teste |
+| `graphs/performance.png` | Tempos médios por etapa e latência por amostra |
+| `graphs/loss.png`, `graphs/f1.png` | Curvas de treino e validação final, objetivo regularizado e indicação da melhor época pelo F1 |
+| `graphs/validation_loss.png`, `graphs/validation_f1_macro.png` | Curvas internas da configuração vencedora, quando disponíveis |
+| `graphs/search.png` | Evolução da busca Optuna, quando disponível |
+| `graphs/confusion_matrix*.png`, `graphs/per_class.png` | Matriz bruta, matriz normalizada por classe real e precisão/recall/F1 |
+
+As curvas `loss.png` e `f1.png` usam o próprio treino final e sua validação. `validation_loss.png` e `validation_f1_macro.png` continuam mostrando as divisões internas da busca. Os resultados antigos de duração fixa permanecem legíveis, mas não possuem curvas de validação final; essas curvas exigem executar o novo protocolo. A confiança softmax é a probabilidade atribuída pelo modelo à classe prevista; não implica calibração de confiança.
+
+A pessoa de validação final pode ter participado das validações da busca; ela é um controle de desenvolvimento, não um segundo teste independente. Somente a pessoa reservada para teste mede a avaliação externa. Reservar validação final também reduz a quantidade de vídeos usados para ajustar os pesos e não garante melhora no teste.
+
+### Desempenho da inferência
+
+Depois da avaliação de acerto, o teste executa uma passagem adicional em modo de
+inferência, com **lote 1**, sem prefetch e com três chamadas de aquecimento excluídas
+dos tempos. Usa o mesmo melhor checkpoint. Não mede as validações da busca Optuna.
+Os arquivos `test.json` e `result.json` também recebem a seção `performance`.
+
+- `data_ms`: leitura/preparo da entrada pelo dataset, incluindo acesso ao cache.
+- `transfer_ms`: envio da entrada ao dispositivo.
+- `inference_ms`: execução do modelo e softmax, sem a transferência dos dados.
+- `postprocess_ms`: retorno das probabilidades à CPU e conversão para lista.
+- `processing_ms`: soma dessas etapas para uma amostra.
+
+Cada etapa registra média, mediana, p95, p99, mínimo, máximo, desvio padrão e total.
+O p95 indica o tempo abaixo do qual ficaram 95% das medições. As taxas registradas
+são **amostras/janelas por segundo**, tanto só do modelo quanto do processamento;
+não são FPS da câmera, pois uma entrada pode representar um vídeo inteiro.
+
+O relatório inclui data UTC, CPU/GPU, versões do Python/PyTorch/CUDA, threads,
+formato/tipo da entrada, aquecimento e tamanho de lote. Registra também se houve
+avaliação de acerto nesta sessão: ela pode aquecer os caches, que não são limpos
+nem têm estado garantido. O total exclui carga do checkpoint, decodificação do vídeo
+bruto, extração de landmarks, coleta da janela temporal e interface. Não permite
+concluir sozinho a latência ou a fluidez da webcam. Em GPU compartilhada, outros
+processos também podem afetar os tempos.
+
+CUDA é sincronizada nas fronteiras de cada etapa para não medir apenas o envio
+assíncrono de operações. Aquecimento e sincronização seguem os cuidados da
+[documentação de benchmark do PyTorch](https://docs.pytorch.org/docs/stable/benchmark_utils.html).
+O benchmark é serial e inclui o custo dessas sincronizações.
+
+Ao reutilizar uma execução que já tem `test.json` mas não tem `performance.json`,
+o pipeline acrescenta a medição usando os pesos salvos e preserva as métricas de
+acerto existentes. Quando ambos existem, reutiliza também os tempos e sua data
+original. Não há estimativa retroativa de tempos a partir dos logs antigos.
+
+Para medir um teste já concluído, sem buscar hiperparâmetros nem treinar novamente:
+
+```bash
+libras-translator --benchmark-run runs/.../final/test_05/val_01/EXECUCAO \
+  --dataset data/minds_libras --device cpu
+```
+
+Informe a pasta que contém `test.json` e `final.pt` (ou `best.pt`). Esse comando
+preserva os resultados de acerto e acrescenta o benchmark. Se já houver medição,
+ela é reutilizada com seu dispositivo e data originais. As medições antigas não
+são migradas para o dispositivo informado. Para um novo benchmark independente,
+copie o checkpoint e `test.json` para outra pasta, sem `performance.json`.
+Esse caminho explícito também evita criar outro treino quando uma alteração de
+código muda o identificador da execução. O `result.json` local é atualizado, mas
+o comando isolado não reescreve o `summary.json` da busca original.
+
+## Organização e extensão
+
+```text
+src/cli/              # argumentos e chamada das etapas
+src/dataset/          # manifesto, divisão e carregamento
+src/preprocessor/     # extração, seleção, interpolação, ancoragem e codificação
+src/models/           # arquiteturas e registry
+src/training/         # configuração, seleção, treino, busca, relatórios e pipeline
+configs/              # presets e espaços de busca
+data/<dataset>/       # vídeos, manifesto e entradas processadas
+runs/<dataset>/       # configurações, checkpoints e métricas
+weights/checkpoints/  # pesos ImageNet compartilhados
+tests/                # verificações do pipeline
+```
+
+Para adicionar modelos ou processors sem editar o pipeline, veja [como estender o projeto](docs/EXTENDING.md).
+
+## Cluster
+
+Para construir `cluster_docker_image:latest` e recriar `cluster01_primo07` com as dependências do `pyproject.toml`, veja o [guia Docker](DOCKER.md). A imagem usa Python 3.12 e dispensa venv. Apenas `/home/primo/src/mhab/models` é montada no container; dados, caches, resultados e pesos ficam dentro do projeto.
+
+Prepare os dados e os pesos em um ambiente com acesso à rede antes do job. Os pesos ImageNet são baixados no primeiro uso; também podem ser copiados para `weights/checkpoints/`.
+
+Para treinar sem transferir os vídeos, copie `metadata/manifest.csv`, os CSVs de landmarks e `processed/landmarks/index.json`. Preserve as datas dos CSVs; o índice confirma a extração completa sem os vídeos originais.
+
+```bash
+libras-translator --encode-landmarks --config configs/resnet18.toml
+libras-translator --train --config configs/resnet18.toml \
+  --test-signer-id 05 \
+  --device cuda:0 --num-workers 4 \
+  --output-dir /home/src/mhab/models/runs \
+  --weights-dir /home/src/mhab/models/weights
+```
+
+Cada processo deve escrever em uma execução exclusiva. O projeto executa um processo por GPU; não distribui um treino entre GPUs nem envia jobs ao Slurm. `cuda:0` considera as GPUs visíveis para o processo.
+
+A busca Optuna executa tentativas em sequência. Use um processo por busca e não compartilhe o mesmo banco entre processos. No cluster informado, a pasta do projeto está em NFS; o SQLite do Optuna nessa pasta tem limitações de bloqueio, descritas no [guia Docker](DOCKER.md#banco-optuna-no-nfs).
+
+## Experimento de referência
+
+O preset ResNet usa ASL-2nd com 80 pontos e interpolação, baseado no [artigo](https://arxiv.org/html/2510.24887v4), e acrescenta a ancoragem fixa no centro dos ombros descrita acima. Na configuração base, apenas `layer4` e `fc` aprendem; as outras camadas e suas estatísticas de BatchNorm ficam congeladas. A busca também considera treinar somente `fc`.
+
+A ResNet termina em softmax para fornecer probabilidades. Durante o treinamento, `forward_logits()` entrega os valores anteriores ao softmax à cross-entropy, que calcula log-softmax de forma numericamente estável. O objetivo inclui label smoothing e as penalidades L1/L2 escolhidas; a loss registrada para comparação com a validação é a cross-entropy sem suavização ou penalidades.
+
+Seleção por F1 macro, busca, congelamento de camadas e treinamento final são escolhas deste projeto e devem ser descritos no relatório experimental. L1/L2 explícitas e weight decay do AdamW são controles diferentes, aplicados aos pesos treináveis; bias e parâmetros de normalização não são penalizados.
